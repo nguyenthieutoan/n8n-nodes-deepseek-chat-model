@@ -7,4 +7,8 @@ gulpfile.js
 .gitignore
 .github
 compose.yaml
-README.md
+
+# Ignore all markdown files except README.md
+*.md
+!README.md
+
