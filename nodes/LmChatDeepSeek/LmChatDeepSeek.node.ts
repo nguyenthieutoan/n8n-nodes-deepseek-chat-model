@@ -5,7 +5,7 @@ import {
 	SupplyData,
 	NodeConnectionTypes,
 } from 'n8n-workflow';
-import { logWrapper } from '@n8n/ai-utilities';
+import { N8nLlmTracing } from '@n8n/ai-utilities';
 import { ChatDeepSeekCorrected } from './ChatDeepSeekCorrected';
 
 export class LmChatDeepSeek implements INodeType {
@@ -20,12 +20,7 @@ export class LmChatDeepSeek implements INodeType {
 			name: 'DeepSeek Chat Model',
 		},
 		inputs: [],
-		outputs: [
-			{
-				displayName: 'Model',
-				type: NodeConnectionTypes.AiLanguageModel,
-			},
-		],
+		outputs: [NodeConnectionTypes.AiLanguageModel],
 		credentials: [
 			{
 				name: 'deepseekApi',
@@ -226,10 +221,11 @@ export class LmChatDeepSeek implements INodeType {
 			topP: options.topP ?? 1,
 			timeout: options.timeout ?? 360000,
 			maxRetries: options.maxRetries ?? 2,
+			callbacks: [new N8nLlmTracing(this)],
 		});
 
 		return {
-			response: logWrapper(model as any, this),
+			response: model,
 		};
 	}
 }

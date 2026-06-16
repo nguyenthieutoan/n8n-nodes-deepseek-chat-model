@@ -89,16 +89,4 @@ export class ChatDeepSeekCorrected extends ChatOpenAI {
 	}
 }
 
-// Thiết lập kế thừa prototype động để vượt qua kiểm tra instanceof trong logWrapper của @n8n/ai-utilities
-try {
-	const aiUtilitiesPath = require.resolve('@n8n/ai-utilities');
-	const langchainChatModelPath = require.resolve('@langchain/core/language_models/chat_models', { paths: [aiUtilitiesPath] });
-	const ParentChatModelClass = require(langchainChatModelPath).BaseChatModel;
-	if (ParentChatModelClass && ParentChatModelClass.prototype) {
-		Object.setPrototypeOf(ChatOpenAI.prototype, ParentChatModelClass.prototype);
-	}
-} catch (e) {
-	// Bỏ qua lỗi nếu không tìm thấy
-}
-
 
