@@ -6,7 +6,7 @@ import {
 	NodeConnectionTypes,
 } from 'n8n-workflow';
 import { N8nLlmTracing } from '@n8n/ai-utilities';
-import { ChatDeepSeekCorrected } from './ChatDeepSeekCorrected';
+import { ChatOpenAI } from '@langchain/openai';
 
 export class LmChatDeepSeek implements INodeType {
 	description: INodeTypeDescription = {
@@ -14,13 +14,21 @@ export class LmChatDeepSeek implements INodeType {
 		name: 'lmChatDeepSeek',
 		icon: 'file:deepseek.png',
 		group: ['transform'],
-		version: 1,
+		version: [1],
 		description: 'Chat model node for DeepSeek with corrected thinking mode and tool support.',
 		defaults: {
 			name: 'DeepSeek Chat Model',
 		},
+		codex: {
+			categories: ['AI'],
+			subcategories: {
+				AI: ['Language Models', 'Root Nodes'],
+				'Language Models': ['Chat Models (Recommended)'],
+			},
+		},
 		inputs: [],
 		outputs: [NodeConnectionTypes.AiLanguageModel],
+		outputNames: ['Model'],
 		credentials: [
 			{
 				name: 'deepseekApi',
@@ -205,11 +213,66 @@ export class LmChatDeepSeek implements INodeType {
 
 		const maxTokensVal = (options.maxTokens !== undefined && options.maxTokens > 0) ? options.maxTokens : undefined;
 
-		const model = new ChatDeepSeekCorrected({
+		const originalFetch = fetch;
+		let currentMessages: any[] = [];
+
+		const interceptingFetch = async (url: any, init?: any) => {
+			if (init && init.body) {
+				try {
+					const body = JSON.parse(init.body);
+					if (body && Array.isArray(body.messages)) {
+						let modified = false;
+
+						if (currentMessages && currentMessages.length > 0) {
+							// Filter input history messages for AIMessage
+							const aiMessages = currentMessages.filter(
+								(m: any) =>
+									m._getType?.() === 'ai' ||
+									m._getType === 'ai' ||
+									m.constructor?.name === 'AIMessage' ||
+									m.type === 'ai'
+							);
+							let aiMsgCount = 0;
+
+							body.messages = body.messages.map((apiMsg: any) => {
+								if (apiMsg.role === 'assistant') {
+									const aiMessage = aiMessages[aiMsgCount++];
+									if (aiMessage) {
+										const reasoning = aiMessage.additional_kwargs?.reasoning_content;
+										if (reasoning) {
+											if (thinkingEnabled) {
+												apiMsg.reasoning_content = reasoning;
+												modified = true;
+											} else {
+												if ('reasoning_content' in apiMsg) {
+													delete apiMsg.reasoning_content;
+													modified = true;
+												}
+											}
+										}
+									}
+								}
+								return apiMsg;
+							});
+						}
+
+						if (modified) {
+							init.body = JSON.stringify(body);
+						}
+					}
+				} catch (e) {
+					// Ignore parsing errors
+				}
+			}
+			return originalFetch(url, init);
+		};
+
+		const model = new ChatOpenAI({
 			apiKey: credentials.apiKey as string,
 			openAIApiKey: credentials.apiKey as string,
 			configuration: {
 				baseURL: credentials.baseUrl as string,
+				fetch: interceptingFetch,
 			},
 			modelName,
 			maxTokens: maxTokensVal,
@@ -221,8 +284,32 @@ export class LmChatDeepSeek implements INodeType {
 			topP: options.topP ?? 1,
 			timeout: options.timeout ?? 360000,
 			maxRetries: options.maxRetries ?? 2,
-			callbacks: [new N8nLlmTracing(this)],
-		});
+			callbacks: [new N8nLlmTracing(this) as any],
+		} as any);
+
+		// Monkeypatch _generate
+		const originalGenerate = model._generate.bind(model);
+		model._generate = async function (messages: any[], options: any, runManager?: any): Promise<any> {
+			currentMessages = messages;
+			try {
+				return await originalGenerate(messages, options, runManager);
+			} finally {
+				currentMessages = [];
+			}
+		};
+
+		// Monkeypatch _streamResponseChunks
+		const originalStreamResponseChunks = (model as any)._streamResponseChunks?.bind(model);
+		if (originalStreamResponseChunks) {
+			(model as any)._streamResponseChunks = async function* (messages: any[], options: any, runManager?: any): AsyncGenerator<any> {
+				currentMessages = messages;
+				try {
+					yield* originalStreamResponseChunks(messages, options, runManager);
+				} finally {
+					currentMessages = [];
+				}
+			};
+		}
 
 		return {
 			response: model,
