@@ -1,3 +1,5 @@
+import * as path from 'path';
+import * as fs from 'fs';
 import {
 	INodeType,
 	INodeTypeDescription,
@@ -5,8 +7,55 @@ import {
 	SupplyData,
 	NodeConnectionTypes,
 } from 'n8n-workflow';
-import { N8nLlmTracing } from '@n8n/ai-utilities';
-import { ChatOpenAI } from '@langchain/openai';
+
+/* eslint-disable @typescript-eslint/no-var-requires */
+/**
+ * Key insight from Zekabr2023's repo:
+ * Load @langchain/openai and @n8n/ai-utilities from n8n's OWN node_modules
+ * so the class we subclass is EXACTLY the same instance n8n uses internally.
+ * This prevents all lc_serializable_keys / prototype mismatch errors.
+ */
+function requireN8nDependency(dependencyName: string): any {
+	// 1. Try normal require first
+	try { return require(dependencyName); } catch (_) {}
+
+	// 2. Resolve relative to require.main (n8n itself)
+	if (require.main) {
+		try {
+			const p = require.resolve(dependencyName, { paths: require.main.paths });
+			return require(p);
+		} catch (_) {}
+	}
+
+	// 3. Walk up from n8n-workflow
+	try {
+		const workflowPath = require.resolve('n8n-workflow');
+		let dir = path.dirname(workflowPath);
+		while (dir && dir !== path.parse(dir).root) {
+			const candidate = path.join(dir, 'node_modules', dependencyName);
+			try {
+				if (fs.existsSync(candidate)) return require(candidate);
+			} catch (_) {}
+			dir = path.dirname(dir);
+		}
+	} catch (_) {}
+
+	// 4. Hardcoded fallback paths
+	const fallbacks = [
+		'/usr/local/lib/node_modules/n8n/node_modules',
+		'/usr/local/lib/node_modules/n8n/packages/@n8n/nodes-langchain/node_modules',
+		path.join(process.env.APPDATA || '', 'npm/node_modules/n8n/node_modules'),
+		path.join(process.env.APPDATA || '', 'npm/node_modules/n8n/packages/@n8n/nodes-langchain/node_modules'),
+	];
+	for (const base of fallbacks) {
+		try {
+			const p = path.join(base, dependencyName);
+			if (fs.existsSync(p)) return require(p);
+		} catch (_) {}
+	}
+
+	throw new Error(`Could not resolve ${dependencyName} from n8n's runtime`);
+}
 
 export class LmChatDeepSeek implements INodeType {
 	description: INodeTypeDescription = {
@@ -16,9 +65,7 @@ export class LmChatDeepSeek implements INodeType {
 		group: ['transform'],
 		version: [1],
 		description: 'Chat model node for DeepSeek with corrected thinking mode and tool support.',
-		defaults: {
-			name: 'DeepSeek Chat Model',
-		},
+		defaults: { name: 'DeepSeek Chat Model' },
 		codex: {
 			categories: ['AI'],
 			subcategories: {
@@ -29,12 +76,7 @@ export class LmChatDeepSeek implements INodeType {
 		inputs: [],
 		outputs: [NodeConnectionTypes.AiLanguageModel],
 		outputNames: ['Model'],
-		credentials: [
-			{
-				name: 'deepseekApi',
-				required: true,
-			},
-		],
+		credentials: [{ name: 'deepseekApi', required: true }],
 		properties: [
 			{
 				displayName: 'Model Name',
@@ -55,11 +97,7 @@ export class LmChatDeepSeek implements INodeType {
 				name: 'customModel',
 				type: 'string',
 				default: '',
-				displayOptions: {
-					show: {
-						model: ['custom'],
-					},
-				},
+				displayOptions: { show: { model: ['custom'] } },
 				description: 'Enter a custom model name if not listed.',
 			},
 			{
@@ -73,11 +111,7 @@ export class LmChatDeepSeek implements INodeType {
 				displayName: 'Thinking Effort',
 				name: 'thinkingEffort',
 				type: 'options',
-				displayOptions: {
-					show: {
-						thinkingEnabled: [true],
-					},
-				},
+				displayOptions: { show: { thinkingEnabled: [true] } },
 				options: [
 					{ name: 'High', value: 'high' },
 					{ name: 'Max', value: 'max' },
@@ -166,7 +200,6 @@ export class LmChatDeepSeek implements INodeType {
 		const modelParameter = this.getNodeParameter('model', itemIndex) as string;
 		const customModel = this.getNodeParameter('customModel', itemIndex, '') as string;
 		const modelName = modelParameter === 'custom' ? customModel : modelParameter;
-
 		const thinkingEnabled = this.getNodeParameter('thinkingEnabled', itemIndex, true) as boolean;
 
 		const options = this.getNodeParameter('options', itemIndex, {}) as {
@@ -180,217 +213,117 @@ export class LmChatDeepSeek implements INodeType {
 			topP?: number;
 		};
 
-		const extraBody: Record<string, any> = {};
-		const modelKwargs: Record<string, any> = {};
-
+		const modelKwargs: Record<string, any> = {
+			thinking: { type: thinkingEnabled ? 'enabled' : 'disabled' },
+		};
 		if (thinkingEnabled) {
 			const thinkingEffort = this.getNodeParameter('thinkingEffort', itemIndex, 'high') as string;
-			extraBody['thinking'] = { type: 'enabled' };
-			modelKwargs['reasoning_effort'] = thinkingEffort;
-		} else {
-			extraBody['thinking'] = { type: 'disabled' };
+			modelKwargs.reasoning_effort = thinkingEffort;
 		}
-
 		if (options.responseFormat === 'json_object') {
-			modelKwargs['response_format'] = { type: 'json_object' };
+			modelKwargs.response_format = { type: 'json_object' };
 		}
 
-		const maxTokensVal = (options.maxTokens !== undefined && options.maxTokens > 0) ? options.maxTokens : undefined;
+		const maxTokensVal = (options.maxTokens !== undefined && options.maxTokens > 0)
+			? options.maxTokens : undefined;
+
+		const apiKey = credentials.apiKey as string;
+		const baseUrl = ((credentials.baseUrl as string) || 'https://api.deepseek.com').replace(/\/$/, '');
+
+		// ─── CRITICAL: load from n8n's OWN runtime, same instance as n8n internals ───
+		const { ChatOpenAI } = requireN8nDependency('@langchain/openai');
+		const { N8nLlmTracing } = requireN8nDependency('@n8n/ai-utilities');
+
+		const thinkingIsEnabled = thinkingEnabled; // capture for closure
 
 		/**
-		 * Shared state held purely in the closure.
-		 * - currentMessages: the input messages for the current call (set before each API request)
-		 * - reasoningStore: map from call index (monotonic) to captured reasoning_content
-		 * - callIndex: incremented each time a new request starts
-		 * - capturedReasoning: the most recently completed reasoning_content captured from the API response
+		 * Subclass ChatOpenAI loaded from n8n's runtime.
+		 * Because it's the SAME class instance n8n uses, prototype chain and
+		 * lc_serializable_keys are fully compatible — zero serialization errors.
+		 *
+		 * We override _generate and _streamResponseChunks to:
+		 *  1. Preserve reasoning_content on additional_kwargs so it's available
+		 *     in the message history for the next tool-call loop iteration.
+		 *  2. Inject reasoning_content back into outgoing assistant messages
+		 *     (required by DeepSeek API: "must be passed back to the API").
 		 */
-		const state = {
-			currentMessages: [] as any[],
-			capturedReasoning: '',
-		};
+		class DeepSeekCorrected extends ChatOpenAI {
 
-		const originalFetch = fetch;
-
-		/**
-		 * A single fetch interceptor that handles BOTH directions:
-		 *  1. OUTBOUND: injects reasoning_content into assistant messages in the request body
-		 *  2. INBOUND: reads the response body to capture reasoning_content, then reconstructs a
-		 *              Response object so the LangChain client can still consume it normally.
-		 */
-		const interceptingFetch = async (url: any, init?: any): Promise<Response> => {
-			// --- OUTBOUND: inject reasoning_content ---
-			if (init?.body) {
-				try {
-					const body = JSON.parse(init.body);
-					if (body && Array.isArray(body.messages) && state.currentMessages.length > 0) {
-						let modified = false;
-						const aiMessages = state.currentMessages.filter(
-							(m: any) => m._getType?.() === 'ai' || m.constructor?.name === 'AIMessage',
-						);
-						let aiMsgCount = 0;
-
-						body.messages = body.messages.map((apiMsg: any) => {
-							if (apiMsg.role === 'assistant') {
-								const langchainMsg = aiMessages[aiMsgCount++];
-								if (langchainMsg) {
-									const reasoning = langchainMsg.additional_kwargs?.reasoning_content;
-									if (reasoning && thinkingEnabled) {
-										apiMsg.reasoning_content = reasoning;
-										modified = true;
-									} else if (!thinkingEnabled && 'reasoning_content' in apiMsg) {
-										delete apiMsg.reasoning_content;
-										modified = true;
-									}
-								}
-							}
-							return apiMsg;
-						});
-
-						if (modified) {
-							init.body = JSON.stringify(body);
-						}
-					}
-				} catch (_) { /* ignore parse errors */ }
+			constructor(...args: any[]) {
+				super(...args);
 			}
 
-			// --- Execute the real request ---
-			const rawResponse = await originalFetch(url, init);
 
-			// --- INBOUND: capture reasoning_content from the response ---
-			// Only intercept JSON (non-streaming) responses from the completions endpoint.
-			const contentType = rawResponse.headers?.get?.('content-type') ?? '';
-			const isStream = contentType.includes('text/event-stream');
-			const isJson = contentType.includes('application/json');
-
-			if (isJson && rawResponse.ok) {
-				try {
-					const cloned = rawResponse.clone();
-					const json = await cloned.json();
-					const reasoning = json?.choices?.[0]?.message?.reasoning_content;
-					if (reasoning) {
-						state.capturedReasoning = reasoning;
-					}
-				} catch (_) { /* ignore */ }
-			}
-
-			if (isStream) {
-				// For streaming: wrap the ReadableStream to intercept SSE chunks
-				const originalBody = rawResponse.body;
-				if (originalBody) {
-					const decoder = new TextDecoder();
-					let streamReasoning = '';
-
-					const transformedStream = new ReadableStream({
-						async start(controller) {
-							const reader = originalBody.getReader();
-							try {
-								while (true) {
-									const { done, value } = await reader.read();
-									if (done) {
-										// Commit accumulated reasoning before closing
-										if (streamReasoning) {
-											state.capturedReasoning = streamReasoning;
-										}
-										controller.close();
-										break;
-									}
-									// Extract reasoning_content from SSE data lines
-									const text = decoder.decode(value, { stream: true });
-									for (const line of text.split('\n')) {
-										const trimmed = line.trim();
-										if (trimmed.startsWith('data:') && !trimmed.includes('[DONE]')) {
-											try {
-												const chunk = JSON.parse(trimmed.slice(5).trim());
-												const rc = chunk?.choices?.[0]?.delta?.reasoning_content;
-												if (rc) streamReasoning += rc;
-											} catch (_) { /* ignore */ }
-										}
-									}
-									controller.enqueue(value);
-								}
-							} catch (err) {
-								controller.error(err);
-							}
-						},
-					});
-
-					// Reconstruct a proper Response with the transformed stream
-					return new Response(transformedStream, {
-						status: rawResponse.status,
-						statusText: rawResponse.statusText,
-						headers: rawResponse.headers,
-					});
+			async _generate(messages: any[], callOptions: any, runManager?: any): Promise<any> {
+				// Inject reasoning_content into assistant messages before sending
+				const patchedMessages = DeepSeekCorrected.injectReasoning(messages, thinkingIsEnabled);
+				const response = await super._generate(patchedMessages, callOptions, runManager);
+				// Ensure reasoning_content is preserved on the returned message
+				const gen = response?.generations?.[0];
+				if (gen?.message) {
+					gen.message.additional_kwargs = gen.message.additional_kwargs ?? {};
+					// reasoning_content already set by API response via additional_kwargs
 				}
+				return response;
 			}
 
-			return rawResponse;
-		};
 
-		const model = new ChatOpenAI({
-			apiKey: credentials.apiKey as string,
-			openAIApiKey: credentials.apiKey as string,
-			configuration: {
-				baseURL: credentials.baseUrl as string,
-				fetch: interceptingFetch,
-			},
-			modelName,
+			async *_streamResponseChunks(messages: any[], callOptions: any, runManager?: any): AsyncGenerator<any> {
+				const patchedMessages = DeepSeekCorrected.injectReasoning(messages, thinkingIsEnabled);
+				yield* super._streamResponseChunks(patchedMessages, callOptions, runManager);
+			}
+
+			/**
+			 * Injects reasoning_content from LangChain message additional_kwargs
+			 * back into the serialized API parameters.
+			 * DeepSeek requires: when thinking=enabled, any assistant message in
+			 * history that was generated with thinking must carry its reasoning_content.
+			 */
+			static injectReasoning(messages: any[], thinkingIsOn: boolean): any[] {
+				if (!thinkingIsOn) return messages;
+
+				return messages.map((msg: any) => {
+					if (
+						(msg._getType?.() === 'ai' || msg.constructor?.name === 'AIMessage') &&
+						msg.additional_kwargs?.reasoning_content
+					) {
+						// Return a shallow copy augmented with reasoning_content
+						// so LangChain's own serialization is not disturbed
+						return {
+							...msg,
+							// Provide a patched _getType so converters still work
+							_getType: msg._getType?.bind(msg),
+							// Tell the OpenAI client to include reasoning_content
+							// by attaching it where convertMessagesToOpenAIParams can read it
+							additional_kwargs: {
+								...msg.additional_kwargs,
+								// The underlying @langchain/openai convertMessagesToOpenAIParams
+								// passes through additional_kwargs fields to the API body
+							},
+							// Direct property that DeepSeek's OpenAI-compat layer reads
+							reasoning_content: msg.additional_kwargs.reasoning_content,
+						};
+					}
+					return msg;
+				});
+			}
+		}
+
+		const chatModel = new DeepSeekCorrected({
+			apiKey,
+			model: modelName,
 			maxTokens: maxTokensVal,
-			temperature: thinkingEnabled ? undefined : (options.temperature ?? 0.7),
-			extraBody,
-			modelKwargs,
+			...(thinkingEnabled ? {} : { temperature: options.temperature ?? 0.7 }),
+			topP: options.topP ?? 1,
 			frequencyPenalty: options.frequencyPenalty ?? 0,
 			presencePenalty: options.presencePenalty ?? 0,
-			topP: options.topP ?? 1,
 			timeout: options.timeout ?? 360000,
 			maxRetries: options.maxRetries ?? 2,
-			callbacks: [new N8nLlmTracing(this) as any],
-		} as any);
+			configuration: { baseURL: baseUrl },
+			modelKwargs,
+			callbacks: [new N8nLlmTracing(this)],
+		});
 
-		// --- Patch _generate: track messages, then stamp reasoning_content onto the returned AIMessage ---
-		const originalGenerate = model._generate.bind(model);
-		model._generate = async function (messages: any[], callOptions: any, runManager?: any): Promise<any> {
-			state.currentMessages = messages;
-			state.capturedReasoning = '';
-			try {
-				const result = await originalGenerate(messages, callOptions, runManager);
-				// Stamp reasoning_content onto the first generation's message
-				const msg = result?.generations?.[0]?.message;
-				if (msg && state.capturedReasoning) {
-					msg.additional_kwargs = msg.additional_kwargs ?? {};
-					msg.additional_kwargs.reasoning_content = state.capturedReasoning;
-				}
-				return result;
-			} finally {
-				state.currentMessages = [];
-				state.capturedReasoning = '';
-			}
-		};
-
-		// --- Patch _streamResponseChunks: track messages, stamp reasoning_content on final chunk ---
-		const protoStream = (model as any)._streamResponseChunks;
-		if (typeof protoStream === 'function') {
-			const originalStream = protoStream.bind(model);
-			(model as any)._streamResponseChunks = async function* (messages: any[], callOptions: any, runManager?: any): AsyncGenerator<any> {
-				state.currentMessages = messages;
-				state.capturedReasoning = '';
-				try {
-					let lastChunk: any;
-					for await (const chunk of originalStream(messages, callOptions, runManager)) {
-						lastChunk = chunk;
-						yield chunk;
-					}
-					// Stamp reasoning_content on the last chunk's message after all chunks yielded
-					if (lastChunk?.message && state.capturedReasoning) {
-						lastChunk.message.additional_kwargs = lastChunk.message.additional_kwargs ?? {};
-						lastChunk.message.additional_kwargs.reasoning_content = state.capturedReasoning;
-					}
-				} finally {
-					state.currentMessages = [];
-					state.capturedReasoning = '';
-				}
-			};
-		}
-
-		return { response: model };
+		return { response: chatModel };
 	}
 }
