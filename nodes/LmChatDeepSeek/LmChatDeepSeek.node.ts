@@ -38,11 +38,11 @@ export class LmChatDeepSeek implements INodeType {
 				name: 'model',
 				type: 'options',
 				options: [
-					{ name: 'deepseek-chat (DeepSeek-V3 / Default)', value: 'deepseek-chat' },
-					{ name: 'deepseek-reasoner (DeepSeek-R1 / Thinking)', value: 'deepseek-reasoner' },
-					{ name: 'deepseek-v4-pro (Xử lý tác vụ chuyên sâu)', value: 'deepseek-v4-pro' },
-					{ name: 'deepseek-v4-flash (Tốc độ cao và tối ưu)', value: 'deepseek-v4-flash' },
-					{ name: 'Custom / Other Model', value: 'custom' },
+					{ name: 'deepseek-chat', value: 'deepseek-chat' },
+					{ name: 'deepseek-reasoner', value: 'deepseek-reasoner' },
+					{ name: 'deepseek-v4-pro', value: 'deepseek-v4-pro' },
+					{ name: 'deepseek-v4-flash', value: 'deepseek-v4-flash' },
+					{ name: 'Custom Model', value: 'custom' },
 				],
 				default: 'deepseek-chat',
 				description: 'Select the DeepSeek model version to use.',
@@ -60,14 +60,14 @@ export class LmChatDeepSeek implements INodeType {
 				description: 'Enter a custom model name if not listed.',
 			},
 			{
-				displayName: 'Bật Chế độ Tư duy (Thinking Mode)',
+				displayName: 'Thinking Mode',
 				name: 'thinkingEnabled',
 				type: 'boolean',
 				default: true,
 				description: 'Enable internal chain-of-thought thinking before responding.',
 			},
 			{
-				displayName: 'Nỗ lực Suy luận (Thinking Effort)',
+				displayName: 'Thinking Effort',
 				name: 'thinkingEffort',
 				type: 'options',
 				displayOptions: {
@@ -76,34 +76,11 @@ export class LmChatDeepSeek implements INodeType {
 					},
 				},
 				options: [
-					{ name: 'Cao (Mặc định cho hầu hết kịch bản)', value: 'high' },
-					{ name: 'Tối đa (Dành cho logic lập trình và tác nhân phức tạp)', value: 'max' },
+					{ name: 'High', value: 'high' },
+					{ name: 'Max', value: 'max' },
 				],
 				default: 'high',
 				description: 'Adjust resource depth for thinking processes.',
-			},
-			{
-				displayName: 'Maximum Output Tokens',
-				name: 'maxTokens',
-				type: 'number',
-				default: 4096,
-				description: 'The maximum number of tokens to generate, including thinking tokens.',
-			},
-			{
-				displayName: 'Nhiệt độ (Temperature)',
-				name: 'temperature',
-				type: 'number',
-				typeOptions: {
-					minValue: 0,
-					maxValue: 2,
-				},
-				default: 1,
-				displayOptions: {
-					show: {
-						thinkingEnabled: [false],
-					},
-				},
-				description: 'Adjust execution creativity. Disabled/ignored during thinking mode.',
 			},
 			{
 				displayName: 'Options',
@@ -119,9 +96,28 @@ export class LmChatDeepSeek implements INodeType {
 						typeOptions: {
 							minValue: -2,
 							maxValue: 2,
+							numberPrecision: 1,
 						},
-						default: 0,
+						default: 0.0,
 						description: 'Positive values penalize new tokens based on their existing frequency in the text.',
+					},
+					{
+						displayName: 'Maximum Number of Tokens',
+						name: 'maxTokens',
+						type: 'number',
+						default: -1,
+						description: 'The maximum number of tokens to generate. Use -1 for unlimited.',
+					},
+					{
+						displayName: 'Response Format',
+						name: 'responseFormat',
+						type: 'options',
+						options: [
+							{ name: 'Text', value: 'text', description: 'Regular text response' },
+							{ name: 'JSON', value: 'json_object', description: 'Enables JSON mode, which should guarantee the message the model generates is valid JSON' },
+						],
+						default: 'text',
+						description: 'Format of the model response.',
 					},
 					{
 						displayName: 'Presence Penalty',
@@ -130,9 +126,36 @@ export class LmChatDeepSeek implements INodeType {
 						typeOptions: {
 							minValue: -2,
 							maxValue: 2,
+							numberPrecision: 1,
 						},
-						default: 0,
+						default: 0.0,
 						description: 'Positive values penalize new tokens based on whether they appear in the text so far.',
+					},
+					{
+						displayName: 'Sampling Temperature',
+						name: 'temperature',
+						type: 'number',
+						typeOptions: {
+							minValue: 0,
+							maxValue: 2,
+							numberPrecision: 1,
+						},
+						default: 0.7,
+						description: 'Adjust execution creativity. Ignored during thinking mode.',
+					},
+					{
+						displayName: 'Timeout',
+						name: 'timeout',
+						type: 'number',
+						default: 360000,
+						description: 'Maximum time in milliseconds to wait for the API response.',
+					},
+					{
+						displayName: 'Max Retries',
+						name: 'maxRetries',
+						type: 'number',
+						default: 2,
+						description: 'Maximum number of retries for failed requests.',
 					},
 					{
 						displayName: 'Top P',
@@ -141,23 +164,10 @@ export class LmChatDeepSeek implements INodeType {
 						typeOptions: {
 							minValue: 0,
 							maxValue: 1,
+							numberPrecision: 1,
 						},
-						default: 1,
+						default: 1.0,
 						description: 'Nucleus sampling: the model considers the results of the tokens with top_p probability mass.',
-					},
-					{
-						displayName: 'Timeout (ms)',
-						name: 'timeout',
-						type: 'number',
-						default: 60000,
-						description: 'Maximum time in milliseconds to wait for the API response.',
-					},
-					{
-						displayName: 'Max Retries',
-						name: 'maxRetries',
-						type: 'number',
-						default: 3,
-						description: 'Maximum number of retries for failed requests.',
 					},
 				],
 			},
@@ -171,15 +181,16 @@ export class LmChatDeepSeek implements INodeType {
 		const modelName = modelParameter === 'custom' ? customModel : modelParameter;
 
 		const thinkingEnabled = this.getNodeParameter('thinkingEnabled', itemIndex, true) as boolean;
-		const maxTokens = this.getNodeParameter('maxTokens', itemIndex, 4096) as number;
-		const temperature = this.getNodeParameter('temperature', itemIndex, 1) as number;
 
 		const options = this.getNodeParameter('options', itemIndex, {}) as {
 			frequencyPenalty?: number;
+			maxTokens?: number;
+			responseFormat?: 'text' | 'json_object';
 			presencePenalty?: number;
-			topP?: number;
+			temperature?: number;
 			timeout?: number;
 			maxRetries?: number;
+			topP?: number;
 		};
 
 		const extraBody: Record<string, any> = {};
@@ -193,21 +204,27 @@ export class LmChatDeepSeek implements INodeType {
 			extraBody['thinking'] = { type: 'disabled' };
 		}
 
+		if (options.responseFormat === 'json_object') {
+			modelKwargs['response_format'] = { type: 'json_object' };
+		}
+
+		const maxTokensVal = (options.maxTokens !== undefined && options.maxTokens > 0) ? options.maxTokens : undefined;
+
 		const model = new ChatDeepSeekCorrected({
 			openAIApiKey: credentials.apiKey as string,
 			configuration: {
 				baseURL: credentials.baseUrl as string,
 			},
 			modelName,
-			maxTokens,
-			temperature: thinkingEnabled ? undefined : temperature,
+			maxTokens: maxTokensVal,
+			temperature: thinkingEnabled ? undefined : (options.temperature ?? 0.7),
 			extraBody,
 			modelKwargs,
-			frequencyPenalty: options.frequencyPenalty,
-			presencePenalty: options.presencePenalty,
-			topP: options.topP,
-			timeout: options.timeout,
-			maxRetries: options.maxRetries,
+			frequencyPenalty: options.frequencyPenalty ?? 0,
+			presencePenalty: options.presencePenalty ?? 0,
+			topP: options.topP ?? 1,
+			timeout: options.timeout ?? 360000,
+			maxRetries: options.maxRetries ?? 2,
 			callbacks: [],
 		});
 
