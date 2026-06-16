@@ -226,7 +226,6 @@ export class LmChatDeepSeek implements INodeType {
 			topP: options.topP ?? 1,
 			timeout: options.timeout ?? 360000,
 			maxRetries: options.maxRetries ?? 2,
-			callbacks: [],
 		});
 
 		return {
