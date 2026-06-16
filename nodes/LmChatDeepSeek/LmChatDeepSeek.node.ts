@@ -211,6 +211,7 @@ export class LmChatDeepSeek implements INodeType {
 		const maxTokensVal = (options.maxTokens !== undefined && options.maxTokens > 0) ? options.maxTokens : undefined;
 
 		const model = new ChatDeepSeekCorrected({
+			apiKey: credentials.apiKey as string,
 			openAIApiKey: credentials.apiKey as string,
 			configuration: {
 				baseURL: credentials.baseUrl as string,
