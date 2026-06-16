@@ -1,0 +1,10 @@
+# Ignore TypeScript sources in npm package
+nodes/**/*.ts
+credentials/**/*.ts
+index.ts
+tsconfig.json
+gulpfile.js
+.gitignore
+.github
+compose.yaml
+README.md

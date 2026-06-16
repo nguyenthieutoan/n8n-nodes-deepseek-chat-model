@@ -1,0 +1,11 @@
+node_modules
+*.log
+.DS_Store
+package-lock.json
+pnpm-lock.yaml
+dist/
+coverage/
+
+# Ignore all markdown files except README.md
+*.md
+!README.md
