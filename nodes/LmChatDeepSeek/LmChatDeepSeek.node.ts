@@ -214,7 +214,6 @@ export class LmChatDeepSeek implements INodeType {
 		const maxTokensVal = (options.maxTokens !== undefined && options.maxTokens > 0) ? options.maxTokens : undefined;
 
 		const originalFetch = fetch;
-		let currentMessages: any[] = [];
 
 		const interceptingFetch = async (url: any, init?: any) => {
 			if (init && init.body) {
@@ -223,7 +222,8 @@ export class LmChatDeepSeek implements INodeType {
 					if (body && Array.isArray(body.messages)) {
 						let modified = false;
 
-						if (currentMessages && currentMessages.length > 0) {
+						const currentMessages = (model as any).currentMessages || [];
+						if (currentMessages.length > 0) {
 							// Filter input history messages for AIMessage
 							const aiMessages = currentMessages.filter(
 								(m: any) =>
@@ -287,14 +287,54 @@ export class LmChatDeepSeek implements INodeType {
 			callbacks: [new N8nLlmTracing(this) as any],
 		} as any);
 
+		// Initialize state properties on the model instance
+		(model as any).currentMessages = [];
+		(model as any).accumulatedReasoning = "";
+
+		// Monkeypatch completionWithRetry
+		const originalCompletionWithRetry = (model as any).completionWithRetry.bind(model);
+		(model as any).completionWithRetry = async function (request: any, options: any) {
+			const res = await originalCompletionWithRetry(request, options);
+			if (request.stream) {
+				const originalStream = res;
+				const interceptedStream = (async function* () {
+					for await (const chunk of originalStream) {
+						const choice = chunk.choices?.[0];
+						const reasoning = choice?.delta?.reasoning_content;
+						if (reasoning) {
+							(model as any).accumulatedReasoning += reasoning;
+						}
+						yield chunk;
+					}
+				})();
+				return interceptedStream;
+			} else {
+				const reasoning = res.choices?.[0]?.message?.reasoning_content;
+				if (reasoning) {
+					(model as any).accumulatedReasoning = reasoning;
+				}
+				return res;
+			}
+		};
+
 		// Monkeypatch _generate
 		const originalGenerate = model._generate.bind(model);
 		model._generate = async function (messages: any[], options: any, runManager?: any): Promise<any> {
-			currentMessages = messages;
+			(model as any).currentMessages = messages;
+			(model as any).accumulatedReasoning = "";
 			try {
-				return await originalGenerate(messages, options, runManager);
+				const result = await originalGenerate(messages, options, runManager);
+				const message = result?.generations?.[0]?.message;
+				if (message && (model as any).accumulatedReasoning) {
+					if (!message.additional_kwargs) {
+						message.additional_kwargs = {};
+					}
+					message.additional_kwargs.reasoning_content = (model as any).accumulatedReasoning;
+				}
+				return result;
 			} finally {
-				currentMessages = [];
+				(model as any).currentMessages = [];
+				(model as any).accumulatedReasoning = "";
 			}
 		};
 
@@ -302,11 +342,23 @@ export class LmChatDeepSeek implements INodeType {
 		const originalStreamResponseChunks = (model as any)._streamResponseChunks?.bind(model);
 		if (originalStreamResponseChunks) {
 			(model as any)._streamResponseChunks = async function* (messages: any[], options: any, runManager?: any): AsyncGenerator<any> {
-				currentMessages = messages;
+				(model as any).currentMessages = messages;
+				(model as any).accumulatedReasoning = "";
 				try {
-					yield* originalStreamResponseChunks(messages, options, runManager);
+					for await (const chunk of originalStreamResponseChunks(messages, options, runManager)) {
+						if (chunk.message) {
+							if (!chunk.message.additional_kwargs) {
+								chunk.message.additional_kwargs = {};
+							}
+							if ((model as any).accumulatedReasoning) {
+								chunk.message.additional_kwargs.reasoning_content = (model as any).accumulatedReasoning;
+							}
+						}
+						yield chunk;
+					}
 				} finally {
-					currentMessages = [];
+					(model as any).currentMessages = [];
+					(model as any).accumulatedReasoning = "";
 				}
 			};
 		}
