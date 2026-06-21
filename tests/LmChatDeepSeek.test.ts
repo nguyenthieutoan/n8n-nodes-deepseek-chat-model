@@ -57,12 +57,12 @@ describe('LmChatDeepSeek Community Node', () => {
 				apiKey: 'sk_test_key_123',
 				baseUrl: 'https://api.deepseek.com'
 			}),
-			getNode: jest.fn().mockReturnValue({ name: 'DeepSeek Chat Model' })
+			getNode: jest.fn().mockReturnValue({ name: 'DeepSeek Chat Model (Preserved Reasoning)' })
 		};
 	});
 
 	test('should define correct node description', () => {
-		expect(node.description.displayName).toBe('DeepSeek Chat Model');
+		expect(node.description.displayName).toBe('DeepSeek Chat Model (Preserved Reasoning)');
 		expect(node.description.name).toBe('lmChatDeepSeek');
 		expect(node.description.icon).toBe('file:deepseek.png');
 		expect(node.description.inputs).toEqual([]);

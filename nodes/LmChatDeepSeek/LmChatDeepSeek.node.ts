@@ -59,7 +59,7 @@ function requireN8nDependency(dependencyName: string): any {
 
 export class LmChatDeepSeek implements INodeType {
 	description: INodeTypeDescription = {
-		displayName: 'DeepSeek Chat Model',
+		displayName: 'DeepSeek Chat Model (Preserved Reasoning)',
 		name: 'lmChatDeepSeek',
 		icon: 'file:deepseek.png',
 		group: ['transform'],
