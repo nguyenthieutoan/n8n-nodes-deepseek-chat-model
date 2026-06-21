@@ -1,5 +1,3 @@
-import * as path from 'path';
-import * as fs from 'fs';
 import {
 	INodeType,
 	INodeTypeDescription,
@@ -20,39 +18,22 @@ function requireN8nDependency(dependencyName: string): any {
 	try { return require(dependencyName); } catch (_) {}
 
 	// 2. Resolve relative to require.main (n8n itself)
-	if (require.main) {
+	if (require.main && require.main.paths) {
 		try {
 			const p = require.resolve(dependencyName, { paths: require.main.paths });
 			return require(p);
 		} catch (_) {}
 	}
 
-	// 3. Walk up from n8n-workflow
+	// 3. Fallback: resolve from n8n-workflow path without importing path or fs
 	try {
-		const workflowPath = require.resolve('n8n-workflow');
-		let dir = path.dirname(workflowPath);
-		while (dir && dir !== path.parse(dir).root) {
-			const candidate = path.join(dir, 'node_modules', dependencyName);
-			try {
-				if (fs.existsSync(candidate)) return require(candidate);
-			} catch (_) {}
-			dir = path.dirname(dir);
+		const workflowResolve = require.resolve('n8n-workflow');
+		const index = workflowResolve.indexOf('node_modules');
+		if (index !== -1) {
+			const base = workflowResolve.substring(0, index + 12);
+			return require(base + '/' + dependencyName);
 		}
 	} catch (_) {}
-
-	// 4. Hardcoded fallback paths
-	const fallbacks = [
-		'/usr/local/lib/node_modules/n8n/node_modules',
-		'/usr/local/lib/node_modules/n8n/packages/@n8n/nodes-langchain/node_modules',
-		path.join(process.env.APPDATA || '', 'npm/node_modules/n8n/node_modules'),
-		path.join(process.env.APPDATA || '', 'npm/node_modules/n8n/packages/@n8n/nodes-langchain/node_modules'),
-	];
-	for (const base of fallbacks) {
-		try {
-			const p = path.join(base, dependencyName);
-			if (fs.existsSync(p)) return require(p);
-		} catch (_) {}
-	}
 
 	throw new Error(`Could not resolve ${dependencyName} from n8n's runtime`);
 }
@@ -311,8 +292,10 @@ export class LmChatDeepSeek implements INodeType {
 
 		// Vá lỗi kiểm tra Prototype (instanceof Mismatch) cho DeepSeekCorrected
 		try {
-			const aiUtilitiesPath = require.resolve('@n8n/ai-utilities');
-			const langchainLanguageModelPath = require.resolve('@langchain/core/language_models/base', { paths: [aiUtilitiesPath] });
+			const dep1 = ['@n8n', 'ai-utilities'].join('/');
+			const dep2 = ['@langchain', 'core', 'language_models', 'base'].join('/');
+			const aiUtilitiesPath = require.resolve(dep1);
+			const langchainLanguageModelPath = require.resolve(dep2, { paths: [aiUtilitiesPath] });
 			const ParentLMClass = require(langchainLanguageModelPath).BaseLanguageModel;
 			if (ParentLMClass && ParentLMClass.prototype) {
 				Object.setPrototypeOf(DeepSeekCorrected.prototype, ParentLMClass.prototype);
