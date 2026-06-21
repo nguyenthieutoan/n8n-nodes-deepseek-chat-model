@@ -1,14 +1,19 @@
-# Ignore TypeScript sources in npm package
+# Source files (only dist/ goes to npm)
 nodes/**/*.ts
 credentials/**/*.ts
 index.ts
 tsconfig.json
 gulpfile.js
-.gitignore
-.github
-compose.yaml
+jest.config.js
 
-# Ignore all markdown files except README.md
+# Dev/CI files
+.github/
+.gitignore
+compose.yaml
+tests/
+coverage/
+docs/
+
+# Internal docs
 *.md
 !README.md
-

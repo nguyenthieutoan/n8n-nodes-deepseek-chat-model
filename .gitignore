@@ -1,11 +1,12 @@
-node_modules
-*.log
-.DS_Store
-package-lock.json
-pnpm-lock.yaml
+node_modules/
 dist/
 coverage/
+*.log
+.DS_Store
+.npmrc
 
-# Ignore all markdown files except README.md
+# Ignore internal docs (not for git/npm)
 *.md
 !README.md
+!RELEASE.md
+!docs/**/*.md

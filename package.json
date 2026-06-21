@@ -1,6 +1,6 @@
 {
   "name": "n8n-nodes-deepseek-chat-model",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "n8n community node for DeepSeek Chat Model with reasoning content preservation",
   "license": "MIT",
   "author": {
@@ -8,6 +8,14 @@
     "email": "me@nguyenthieutoan.com",
     "url": "https://nguyenthieutoan.com"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nguyenthieutoan/n8n-nodes-deepseek-chat-model.git"
+  },
+  "bugs": {
+    "url": "https://github.com/nguyenthieutoan/n8n-nodes-deepseek-chat-model/issues"
+  },
+  "homepage": "https://github.com/nguyenthieutoan/n8n-nodes-deepseek-chat-model#readme",
   "keywords": [
     "n8n-community-node-package"
   ],
