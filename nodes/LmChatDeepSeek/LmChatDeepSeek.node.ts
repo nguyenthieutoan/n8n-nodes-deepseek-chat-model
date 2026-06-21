@@ -290,17 +290,6 @@ export class LmChatDeepSeek implements INodeType {
 			}
 		}
 
-		// Vá lỗi kiểm tra Prototype (instanceof Mismatch) cho DeepSeekCorrected
-		try {
-			const dep1 = ['@n8n', 'ai-utilities'].join('/');
-			const dep2 = ['@langchain', 'core', 'language_models', 'base'].join('/');
-			const aiUtilitiesPath = require.resolve(dep1);
-			const langchainLanguageModelPath = require.resolve(dep2, { paths: [aiUtilitiesPath] });
-			const ParentLMClass = require(langchainLanguageModelPath).BaseLanguageModel;
-			if (ParentLMClass && ParentLMClass.prototype) {
-				Object.setPrototypeOf(DeepSeekCorrected.prototype, ParentLMClass.prototype);
-			}
-		} catch (e) {}
 
 		const chatModel = new DeepSeekCorrected({
 			apiKey,
