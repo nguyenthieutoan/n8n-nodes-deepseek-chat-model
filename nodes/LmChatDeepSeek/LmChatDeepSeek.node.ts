@@ -59,7 +59,7 @@ function requireN8nDependency(dependencyName: string): any {
 
 export class LmChatDeepSeek implements INodeType {
 	description: INodeTypeDescription = {
-		displayName: 'DeepSeek Chat Model (Corrected)',
+		displayName: 'DeepSeek Chat Model',
 		name: 'lmChatDeepSeek',
 		icon: 'file:deepseek.png',
 		group: ['transform'],
@@ -308,6 +308,16 @@ export class LmChatDeepSeek implements INodeType {
 				});
 			}
 		}
+
+		// Vá lỗi kiểm tra Prototype (instanceof Mismatch) cho DeepSeekCorrected
+		try {
+			const aiUtilitiesPath = require.resolve('@n8n/ai-utilities');
+			const langchainLanguageModelPath = require.resolve('@langchain/core/language_models/base', { paths: [aiUtilitiesPath] });
+			const ParentLMClass = require(langchainLanguageModelPath).BaseLanguageModel;
+			if (ParentLMClass && ParentLMClass.prototype) {
+				Object.setPrototypeOf(DeepSeekCorrected.prototype, ParentLMClass.prototype);
+			}
+		} catch (e) {}
 
 		const chatModel = new DeepSeekCorrected({
 			apiKey,
