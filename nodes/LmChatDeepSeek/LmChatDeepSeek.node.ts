@@ -38,195 +38,6 @@ function requireN8nDependency(dependencyName: string): any {
 	throw new Error(`Could not resolve ${dependencyName} from n8n's runtime`);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Utility: Sanitize tool name for comparison (strip non-alphanumeric, lowercase)
-// ─────────────────────────────────────────────────────────────────────────────
-function sanitizeName(name: string): string {
-	if (!name) return '';
-	return name.toLowerCase().replace(/[^a-z0-9]/g, '').trim();
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Core: Tool filtering logic that runs at HTTP request level
-// This function analyzes the raw OpenAI-format request body and filters tools
-// based on one-shot rules, max execution limits, and anti-loop detection.
-// ─────────────────────────────────────────────────────────────────────────────
-function filterToolsInRequestBody(
-	body: any,
-	oneShotToolsList: string[],
-	maxToolExecutions: number,
-): any {
-	if (!body.tools || !Array.isArray(body.tools) || !body.messages || !Array.isArray(body.messages)) {
-		return body;
-	}
-
-	const oneShotSet = new Set(oneShotToolsList.map(n => sanitizeName(n)));
-	const callCounts: Record<string, number> = {};
-	let lastSignature: string | null = null;
-	let consecutiveLoopDetected = false;
-	let lastToolName: string | null = null;
-	let consecutiveToolNameCount = 0;
-	let consecutiveToolLoopDetected = false;
-
-	// Scan message history for tool calls (raw OpenAI message format)
-	for (const msg of body.messages) {
-		if (msg.role === 'assistant' && msg.tool_calls && Array.isArray(msg.tool_calls)) {
-			for (const tc of msg.tool_calls) {
-				const name = tc.function?.name;
-				if (!name) continue;
-
-				const sanitized = sanitizeName(name);
-				callCounts[sanitized] = (callCounts[sanitized] || 0) + 1;
-
-				// 1. Identical signature check (same tool + same arguments)
-				const argsStr = tc.function?.arguments || '{}';
-				const signature = `${name}:${argsStr}`;
-				if (lastSignature === signature) {
-					consecutiveLoopDetected = true;
-				}
-				lastSignature = signature;
-
-				// 2. Consecutive same tool name check (≥3 consecutive calls to same tool)
-				if (lastToolName === sanitized) {
-					consecutiveToolNameCount++;
-					if (consecutiveToolNameCount >= 3) {
-						consecutiveToolLoopDetected = true;
-					}
-				} else {
-					consecutiveToolNameCount = 1;
-				}
-				lastToolName = sanitized;
-			}
-		}
-	}
-
-	const modified = { ...body };
-
-	if (consecutiveLoopDetected || consecutiveToolLoopDetected) {
-		// Circuit breaker: remove all tools and inject stop message
-		console.warn('[DeepSeek] Anti-loop circuit breaker activated. Removing all tools.');
-		delete modified.tools;
-		modified.messages = [
-			...modified.messages,
-			{
-				role: 'user',
-				content: 'Yêu cầu hệ thống khẩn cấp: Bạn đang bị kẹt trong một vòng lặp gọi công cụ. Ngay lập tức ngừng gọi thêm bất kỳ công cụ nào và sử dụng thông tin đã thu thập trước đó để đưa ra câu trả lời trực tiếp.',
-			},
-		];
-	} else {
-		// Filter tools: remove one-shot tools that already ran, and tools at max
-		const filtered = modified.tools.filter((t: any) => {
-			const name = t.function?.name;
-			if (!name) return true;
-			const sanitized = sanitizeName(name);
-
-			// One-shot check
-			if (oneShotSet.has(sanitized) && (callCounts[sanitized] || 0) >= 1) {
-				console.warn(`[DeepSeek] One-shot tool "${name}" already used. Removing from available tools.`);
-				return false;
-			}
-
-			// Max executions check
-			if ((callCounts[sanitized] || 0) >= maxToolExecutions) {
-				console.warn(`[DeepSeek] Tool "${name}" reached max executions (${maxToolExecutions}). Removing.`);
-				return false;
-			}
-
-			return true;
-		});
-
-		if (filtered.length === 0) {
-			console.warn('[DeepSeek] No tools remaining after filtering. Removing tools option.');
-			delete modified.tools;
-		} else {
-			modified.tools = filtered;
-		}
-	}
-
-	// Enforce strict JSON schemas on remaining tools
-	if (modified.tools && Array.isArray(modified.tools)) {
-		modified.tools = modified.tools.map((t: any) => {
-			if (t.function?.parameters) {
-				return {
-					...t,
-					strict: true,
-					function: {
-						...t.function,
-						parameters: enforceStrictSchema(t.function.parameters),
-					},
-				};
-			}
-			return t;
-		});
-	}
-
-	return modified;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Utility: Enforce additionalProperties:false + required on all object schemas
-// ─────────────────────────────────────────────────────────────────────────────
-function enforceStrictSchema(schema: any): any {
-	if (!schema || typeof schema !== 'object') return schema;
-
-	if (schema.type === 'object') {
-		const result = { ...schema };
-		result.additionalProperties = false;
-		if (result.properties) {
-			result.required = Object.keys(result.properties);
-			const newProperties: Record<string, any> = {};
-			for (const [key, value] of Object.entries(result.properties)) {
-				newProperties[key] = enforceStrictSchema(value);
-			}
-			result.properties = newProperties;
-		} else {
-			result.required = [];
-		}
-		return result;
-	}
-
-	if (schema.type === 'array' && schema.items) {
-		return { ...schema, items: enforceStrictSchema(schema.items) };
-	}
-
-	return schema;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Factory: Create a custom fetch function that intercepts API requests
-// to apply tool filtering at the HTTP level.
-//
-// This is the PRIMARY mechanism for tool filtering. It works regardless of
-// how many RunnableBinding / Model Selector wrappers exist between n8n's
-// Agent node and our model, because every code path MUST eventually make
-// an HTTP request to the DeepSeek API.
-// ─────────────────────────────────────────────────────────────────────────────
-function createToolFilteringFetch(
-	oneShotToolsList: string[],
-	maxToolExecutions: number,
-): typeof globalThis.fetch {
-	const hasFiltering = oneShotToolsList.length > 0 || maxToolExecutions < Infinity;
-
-	return async function toolFilteringFetch(
-		input: RequestInfo | URL,
-		init?: RequestInit,
-	): Promise<Response> {
-		// Only intercept POST requests with a body (chat completions)
-		if (hasFiltering && init?.method === 'POST' && init.body && typeof init.body === 'string') {
-			try {
-				const body = JSON.parse(init.body);
-				if (body.tools && body.messages) {
-					const filtered = filterToolsInRequestBody(body, oneShotToolsList, maxToolExecutions);
-					init = { ...init, body: JSON.stringify(filtered) };
-				}
-			} catch (_) {
-				// If JSON parsing fails, pass through unchanged
-			}
-		}
-		return globalThis.fetch(input, init);
-	};
-}
-
 export class LmChatDeepSeek implements INodeType {
 	description: INodeTypeDescription = {
 		displayName: 'DeepSeek Chat Model (Preserved Reasoning)',
@@ -297,35 +108,10 @@ export class LmChatDeepSeek implements INodeType {
 					{
 						displayName: 'One-Shot Tools',
 						name: 'oneShotTools',
-						type: 'fixedCollection',
-						default: {},
-						placeholder: 'Add Tool Name',
-						typeOptions: {
-							multipleValues: true,
-						},
-						options: [
-							{
-								displayName: 'Tool Name',
-								name: 'tools',
-								values: [
-									{
-										displayName: 'Tool Name',
-										name: 'name',
-										type: 'string',
-										default: '',
-										description: 'The name of the tool that should only be executed at most once (e.g. "search_document").',
-									},
-								],
-							},
-						],
-						description: 'List of tool names that should only be executed at most once per execution.',
-					},
-					{
-						displayName: 'Max Tool Executions',
-						name: 'maxToolExecutions',
-						type: 'number',
-						default: 3,
-						description: 'The maximum number of times any single tool can be executed per run. Prevents loops when the AI changes query parameters repeatedly.',
+						type: 'string',
+						default: '',
+						placeholder: 'rag_tool, send_message',
+						description: 'Comma-separated list of tool names that can only be called at most once during execution.',
 					},
 					{
 						displayName: 'Frequency Penalty',
@@ -404,10 +190,7 @@ export class LmChatDeepSeek implements INodeType {
 		const thinkingEnabled = this.getNodeParameter('thinkingEnabled', itemIndex, false) as boolean;
 
 		const options = this.getNodeParameter('options', itemIndex, {}) as {
-			oneShotTools?: string | {
-				tools?: Array<{ name: string }>;
-			};
-			maxToolExecutions?: number;
+			oneShotTools?: string;
 			frequencyPenalty?: number;
 			maxTokens?: number;
 			responseFormat?: 'text' | 'json_object';
@@ -418,23 +201,11 @@ export class LmChatDeepSeek implements INodeType {
 			topP?: number;
 		};
 
-		// ── Parse one-shot tools list (supports both string and fixedCollection formats) ──
-		let oneShotToolsList: string[] = [];
-		if (options.oneShotTools) {
-			if (typeof options.oneShotTools === 'string') {
-				oneShotToolsList = options.oneShotTools
-					.split(',')
-					.map(name => name.trim())
-					.filter(name => name.length > 0);
-			} else if (typeof options.oneShotTools === 'object' && options.oneShotTools !== null) {
-				const tools = (options.oneShotTools as any).tools || [];
-				oneShotToolsList = tools
-					.map((item: any) => item.name ? String(item.name).trim() : '')
-					.filter((name: string) => name.length > 0);
-			}
-		}
-
-		const maxToolExecutionsVal = options.maxToolExecutions !== undefined ? options.maxToolExecutions : 3;
+		const oneShotToolsRaw = options.oneShotTools || '';
+		const oneShotToolsList = oneShotToolsRaw
+			.split(',')
+			.map(t => t.trim())
+			.filter(t => t.length > 0);
 
 		const modelKwargs: Record<string, any> = {};
 		if (thinkingEnabled) {
@@ -473,36 +244,29 @@ export class LmChatDeepSeek implements INodeType {
 		 *     in the message history for the next tool-call loop iteration.
 		 *  2. Inject reasoning_content back into outgoing assistant messages
 		 *     (required by DeepSeek API: "must be passed back to the API").
-		 *  3. (BACKUP) Process call options to enforce strict schema and limit
-		 *     tool execution — primary filtering is done at HTTP fetch level.
+		 *  3. Process call options to enforce strict schema structure and limit tool execution.
 		 */
 		class DeepSeekCorrected extends ChatOpenAI {
 			oneShotToolsList: string[] = [];
-			maxToolExecutions: number = 3;
 			HumanMessageClass: any;
 
 			constructor(fields: any) {
-				const { oneShotToolsList, maxToolExecutions, HumanMessageClass, ...rest } = fields;
+				const { oneShotToolsList, HumanMessageClass, ...rest } = fields;
 				super(rest);
 				this.oneShotToolsList = oneShotToolsList || [];
-				this.maxToolExecutions = maxToolExecutions !== undefined ? maxToolExecutions : 3;
 				this.HumanMessageClass = HumanMessageClass;
 			}
 
 			async _generate(messages: any[], callOptions: any, runManager?: any): Promise<any> {
 				const patchedMessages = DeepSeekCorrected.injectReasoning(messages, thinkingIsEnabled);
-
-				// BACKUP: Apply tool filtering at _generate level too
-				// (in case this method IS called — e.g. when no Model Selector is used)
 				const {
 					patchedMessages: finalMessages,
 					patchedCallOptions,
 				} = DeepSeekCorrected.patchMessagesAndCallOptions(
 					patchedMessages,
 					callOptions,
-					oneShotToolsList,
-					maxToolExecutionsVal,
-					HumanMessage
+					this.oneShotToolsList,
+					this.HumanMessageClass
 				);
 
 				const response = await super._generate(finalMessages, patchedCallOptions, runManager);
@@ -521,9 +285,8 @@ export class LmChatDeepSeek implements INodeType {
 				} = DeepSeekCorrected.patchMessagesAndCallOptions(
 					patchedMessages,
 					callOptions,
-					oneShotToolsList,
-					maxToolExecutionsVal,
-					HumanMessage
+					this.oneShotToolsList,
+					this.HumanMessageClass
 				);
 				yield* super._streamResponseChunks(finalMessages, patchedCallOptions, runManager);
 			}
@@ -562,42 +325,51 @@ export class LmChatDeepSeek implements INodeType {
 			}
 
 			/**
-			 * BACKUP tool filtering at _generate() level.
-			 * Primary filtering happens at HTTP fetch level (createToolFilteringFetch).
-			 * This serves as defense-in-depth for code paths that DO call _generate directly.
+			 * Implements strict JSON Schema validation and limits tool execution.
+			 */
+			static sanitizeNameForComparison(name: string): string {
+				if (!name) return '';
+				return name.toLowerCase().replace(/[^a-z0-9]/g, '_').replace(/_+/g, '_').trim();
+			}
+
+			/**
+			 * Implements strict JSON Schema validation and limits tool execution.
 			 */
 			static patchMessagesAndCallOptions(
 				messages: any[],
 				callOptions: any,
 				oneShotToolsList: string[],
-				maxToolExecutions: number,
 				HumanMessageClass: any
 			): { patchedMessages: any[]; patchedCallOptions: any } {
+				console.log('--- DeepSeek patchMessagesAndCallOptions START ---');
+				console.log('oneShotToolsList:', oneShotToolsList);
+				console.log('Number of messages in history:', messages.length);
+
 				const patchedMessages = [...messages];
 				const patchedCallOptions = callOptions ? { ...callOptions } : {};
 
 				if (patchedCallOptions.tools && Array.isArray(patchedCallOptions.tools)) {
+					console.log('Available tools in callOptions:', patchedCallOptions.tools.map((t: any) => t.function?.name));
 					const oneShotToolsSet = new Set(
-						oneShotToolsList.map((t: string) => sanitizeName(t))
+						oneShotToolsList.map((t: string) => DeepSeekCorrected.sanitizeNameForComparison(t))
 					);
 					const callCounts: Record<string, number> = {};
 					let lastSignature: string | null = null;
 					let consecutiveLoopDetected = false;
 
-					let consecutiveToolNameCount = 0;
-					let lastToolName: string | null = null;
-					let consecutiveToolLoopDetected = false;
-
 					for (let index = 0; index < messages.length; index++) {
 						const msg = messages[index];
+						console.log(`Message ${index} type:`, msg.constructor?.name || typeof msg, 'role:', msg._getType?.());
 						
 						let toolCalls: any[] = [];
 						if (msg.tool_calls && Array.isArray(msg.tool_calls)) {
+							console.log(`Message ${index} has msg.tool_calls:`, msg.tool_calls);
 							toolCalls = msg.tool_calls.map((tc: any) => ({
 								name: tc.name,
 								args: tc.args || {},
 							}));
 						} else if (msg.additional_kwargs?.tool_calls && Array.isArray(msg.additional_kwargs.tool_calls)) {
+							console.log(`Message ${index} has msg.additional_kwargs.tool_calls:`, msg.additional_kwargs.tool_calls);
 							toolCalls = msg.additional_kwargs.tool_calls.map((tc: any) => {
 								let args = {};
 								if (tc.function?.arguments) {
@@ -610,70 +382,68 @@ export class LmChatDeepSeek implements INodeType {
 									args,
 								};
 							});
+						} else {
+							if (msg._getType?.() === 'ai' || msg.constructor?.name === 'AIMessage') {
+								console.log(`Message ${index} is AI but has no tool calls. Content:`, msg.content);
+							}
 						}
 
 						for (const tc of toolCalls) {
 							if (tc.name) {
-								const sanitizedName = sanitizeName(tc.name);
+								const sanitizedName = DeepSeekCorrected.sanitizeNameForComparison(tc.name);
 								callCounts[sanitizedName] = (callCounts[sanitizedName] || 0) + 1;
 
 								const argsStr = tc.args ? JSON.stringify(tc.args) : '{}';
 								const signature = `${tc.name}:${argsStr}`;
+								console.log(`Analyzed tool call: ${tc.name}, signature: ${signature}, lastSignature was: ${lastSignature}`);
 								
 								if (lastSignature === signature) {
 									consecutiveLoopDetected = true;
+									console.log(`[LOOP DETECTED] Consecutive loop signature match: ${signature}`);
 								}
 								lastSignature = signature;
-
-								if (lastToolName === sanitizedName) {
-									consecutiveToolNameCount++;
-									if (consecutiveToolNameCount >= 3) {
-										consecutiveToolLoopDetected = true;
-									}
-								} else {
-									consecutiveToolNameCount = 1;
-								}
-								lastToolName = sanitizedName;
 							}
 						}
 					}
 
-					if (consecutiveLoopDetected || consecutiveToolLoopDetected) {
+					console.log('Final callCounts:', callCounts);
+					console.log('consecutiveLoopDetected:', consecutiveLoopDetected);
+
+					if (consecutiveLoopDetected) {
+						console.log('Applying consecutive loop ngắt mạch...');
 						patchedMessages.push(
 							new HumanMessageClass(
-								'Yêu cầu hệ thống khẩn cấp: Bạn đang bị kẹt trong một vòng lặp gọi công cụ với các tham số trùng lặp hoặc lặp chuỗi. Ngay lập tức ngừng việc gọi thêm bất kỳ công cụ nào và sử dụng các thông tin đã thu thập trước đó để đưa ra câu trả lời trực tiếp cho tôi.'
+								'Yêu cầu hệ thống khẩn cấp: Bạn đang bị kẹt trong một vòng lặp gọi công cụ với các tham số trùng lặp. Ngay lập tức ngừng việc gọi thêm bất kỳ công cụ nào và sử dụng các thông tin đã thu thập trước đó để đưa ra câu trả lời trực tiếp cho tôi.'
 							)
 						);
 						delete patchedCallOptions.tools;
 					} else {
+						// Otherwise, filter out one-shot tools that have already been executed
 						patchedCallOptions.tools = patchedCallOptions.tools
 							.filter((t: any) => {
 								const name = t.function?.name;
 								if (name) {
-									const sanitizedName = sanitizeName(name);
-									
+									const sanitizedName = DeepSeekCorrected.sanitizeNameForComparison(name);
 									if (oneShotToolsSet.has(sanitizedName)) {
 										const count = callCounts[sanitizedName] || 0;
+										console.log(`Checking one-shot tool ${name} (sanitized: ${sanitizedName}), count in history: ${count}`);
 										if (count >= 1) {
-											return false;
+											console.log(`Filtering out one-shot tool ${name} because count ${count} >= 1`);
+											return false; // Disable this tool since it already ran once
 										}
-									}
-
-									const count = callCounts[sanitizedName] || 0;
-									if (count >= maxToolExecutions) {
-										return false;
 									}
 								}
 								return true;
 							})
 							.map((t: any) => {
+								// Enforce strict schemas
 								if (t.function?.parameters) {
 									return {
 										...t,
 										strict: true,
 										function: {
 											...t.function,
-											parameters: enforceStrictSchema(t.function.parameters),
+											parameters: DeepSeekCorrected.enforceStrictSchema(t.function.parameters),
 										},
 									};
 								}
@@ -681,16 +451,53 @@ export class LmChatDeepSeek implements INodeType {
 							});
 
 						if (patchedCallOptions.tools.length === 0) {
+							console.log('No tools left after one-shot filtering. Deleting tools option.');
 							delete patchedCallOptions.tools;
+						} else {
+							console.log('Tools remaining after one-shot filtering:', patchedCallOptions.tools.map((t: any) => t.function?.name));
 						}
 					}
+				} else {
+					console.log('No tools present in callOptions.');
 				}
 
+				console.log('--- DeepSeek patchMessagesAndCallOptions END ---');
 				return { patchedMessages, patchedCallOptions };
+			}
+
+			static enforceStrictSchema(schema: any): any {
+				if (!schema || typeof schema !== 'object') {
+					return schema;
+				}
+
+				if (schema.type === 'object') {
+					const result = { ...schema };
+					result.additionalProperties = false;
+
+					if (result.properties) {
+						result.required = Object.keys(result.properties);
+						const newProperties: Record<string, any> = {};
+						for (const [key, value] of Object.entries(result.properties)) {
+							newProperties[key] = DeepSeekCorrected.enforceStrictSchema(value);
+						}
+						result.properties = newProperties;
+					} else {
+						result.required = [];
+					}
+					return result;
+				}
+
+				if (schema.type === 'array' && schema.items) {
+					return {
+						...schema,
+						items: DeepSeekCorrected.enforceStrictSchema(schema.items),
+					};
+				}
+
+				return schema;
 			}
 		}
 
-		// ─── Create model with custom fetch for HTTP-level tool filtering ───
 		const chatModel = new DeepSeekCorrected({
 			apiKey,
 			model: modelName,
@@ -701,14 +508,10 @@ export class LmChatDeepSeek implements INodeType {
 			presencePenalty: options.presencePenalty ?? 0,
 			timeout: options.timeout ?? 360000,
 			maxRetries: options.maxRetries ?? 2,
-			configuration: {
-				baseURL: baseUrl,
-				fetch: createToolFilteringFetch(oneShotToolsList, maxToolExecutionsVal),
-			},
+			configuration: { baseURL: baseUrl },
 			modelKwargs,
 			callbacks: [new N8nLlmTracing(this)],
 			oneShotToolsList,
-			maxToolExecutions: maxToolExecutionsVal,
 			HumanMessageClass: HumanMessage,
 		});
 
