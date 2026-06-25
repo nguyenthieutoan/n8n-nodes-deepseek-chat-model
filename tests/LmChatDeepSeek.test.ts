@@ -114,4 +114,95 @@ describe('LmChatDeepSeek Community Node', () => {
 		expect(patchedMessages[0].reasoning_content).toBe('This is my internal thinking.');
 		expect(patchedMessages[0].additional_kwargs.reasoning_content).toBe('This is my internal thinking.');
 	});
+
+	test('HTTP-level tool filtering via custom fetch configuration', async () => {
+		// Set options
+		mockSupplyDataContext.getNodeParameter = jest.fn().mockImplementation((paramName, index, fallback) => {
+			if (paramName === 'model') return 'deepseek-chat';
+			if (paramName === 'thinkingEnabled') return false;
+			if (paramName === 'options') return {
+				oneShotTools: 'one_shot_tool',
+				maxToolExecutions: 2,
+			};
+			return fallback;
+		});
+
+		const result = (await node.supplyData.call(mockSupplyDataContext, 0)) as any;
+		const customFetch = result.response.config.configuration.fetch;
+
+		expect(customFetch).toBeDefined();
+
+		// Mock globalThis.fetch
+		const originalFetch = globalThis.fetch;
+		const mockFetch = jest.fn().mockResolvedValue({} as any);
+		globalThis.fetch = mockFetch;
+
+		try {
+			// Test 1: Simple passthrough for normal requests (non-POST or no body or not tool requests)
+			await customFetch('https://api.deepseek.com/v1/models', { method: 'GET' });
+			expect(mockFetch).toHaveBeenCalledWith('https://api.deepseek.com/v1/models', { method: 'GET' });
+			mockFetch.mockClear();
+
+			// Test 2: Filtering tool requests
+			const requestBody = {
+				model: 'deepseek-chat',
+				messages: [
+					{ role: 'user', content: 'hello' },
+					{ role: 'assistant', tool_calls: [{ function: { name: 'one_shot_tool', arguments: '{"q": "1"}' } }] },
+					{ role: 'tool', content: 'tool response' }
+				],
+				tools: [
+					{ function: { name: 'one_shot_tool', parameters: { type: 'object', properties: {} } } },
+					{ function: { name: 'regular_tool', parameters: { type: 'object', properties: {} } } }
+				]
+			};
+
+			await customFetch('https://api.deepseek.com/v1/chat/completions', {
+				method: 'POST',
+				body: JSON.stringify(requestBody)
+			});
+
+			expect(mockFetch).toHaveBeenCalledTimes(1);
+			const [url, init] = (mockFetch as any).mock.calls[0];
+			expect(url).toBe('https://api.deepseek.com/v1/chat/completions');
+			
+			const sentBody = JSON.parse(init.body);
+			// one_shot_tool should be filtered out
+			expect(sentBody.tools).toBeDefined();
+			expect(sentBody.tools.map((t: any) => t.function.name)).toEqual(['regular_tool']);
+			// strict: true and additionalProperties: false should be enforced
+			expect(sentBody.tools[0].strict).toBe(true);
+			expect(sentBody.tools[0].function.parameters.additionalProperties).toBe(false);
+
+			mockFetch.mockClear();
+
+			// Test 3: Anti-loop circuit breaker
+			const loopRequestBody = {
+				model: 'deepseek-chat',
+				messages: [
+					{ role: 'user', content: 'hello' },
+					{ role: 'assistant', tool_calls: [{ function: { name: 'regular_tool', arguments: '{"q":"1"}' } }] },
+					{ role: 'tool', content: 'tool response' },
+					{ role: 'assistant', tool_calls: [{ function: { name: 'regular_tool', arguments: '{"q":"1"}' } }] },
+					{ role: 'tool', content: 'tool response' }
+				],
+				tools: [
+					{ function: { name: 'regular_tool', parameters: { type: 'object', properties: {} } } }
+				]
+			};
+
+			await customFetch('https://api.deepseek.com/v1/chat/completions', {
+				method: 'POST',
+				body: JSON.stringify(loopRequestBody)
+			});
+
+			expect(mockFetch).toHaveBeenCalledTimes(1);
+			const sentLoopBody = JSON.parse((mockFetch as any).mock.calls[0][1].body);
+			// Tools should be completely deleted
+			expect(sentLoopBody.tools).toBeUndefined();
+
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
+	});
 });

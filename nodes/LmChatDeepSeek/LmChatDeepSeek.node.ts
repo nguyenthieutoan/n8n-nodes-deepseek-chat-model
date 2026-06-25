@@ -38,6 +38,181 @@ function requireN8nDependency(dependencyName: string): any {
 	throw new Error(`Could not resolve ${dependencyName} from n8n's runtime`);
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Utility: Sanitize tool name for comparison (strip non-alphanumeric, lowercase)
+// ─────────────────────────────────────────────────────────────────────────────
+function sanitizeName(name: string): string {
+	if (!name) return '';
+	return name.toLowerCase().replace(/[^a-z0-9]/g, '').trim();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Utility: Enforce additionalProperties:false + required on all object schemas
+// ─────────────────────────────────────────────────────────────────────────────
+function enforceStrictSchema(schema: any): any {
+	if (!schema || typeof schema !== 'object') return schema;
+
+	if (schema.type === 'object') {
+		const result = { ...schema };
+		result.additionalProperties = false;
+		if (result.properties) {
+			result.required = Object.keys(result.properties);
+			const newProperties: Record<string, any> = {};
+			for (const [key, value] of Object.entries(result.properties)) {
+				newProperties[key] = enforceStrictSchema(value);
+			}
+			result.properties = newProperties;
+		} else {
+			result.required = [];
+		}
+		return result;
+	}
+
+	if (schema.type === 'array' && schema.items) {
+		return { ...schema, items: enforceStrictSchema(schema.items) };
+	}
+
+	return schema;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Core: Tool filtering logic that runs at HTTP request level
+// ─────────────────────────────────────────────────────────────────────────────
+function filterToolsInRequestBody(
+	body: any,
+	oneShotToolsList: string[],
+	maxToolExecutions: number,
+): any {
+	if (!body.tools || !Array.isArray(body.tools) || !body.messages || !Array.isArray(body.messages)) {
+		return body;
+	}
+
+	const oneShotSet = new Set(oneShotToolsList.map(n => sanitizeName(n)));
+	const callCounts: Record<string, number> = {};
+	let lastSignature: string | null = null;
+	let consecutiveLoopDetected = false;
+	let lastToolName: string | null = null;
+	let consecutiveToolNameCount = 0;
+	let consecutiveToolLoopDetected = false;
+
+	// Scan message history for tool calls (raw OpenAI message format)
+	for (const msg of body.messages) {
+		if (msg.role === 'assistant' && msg.tool_calls && Array.isArray(msg.tool_calls)) {
+			for (const tc of msg.tool_calls) {
+				const name = tc.function?.name;
+				if (!name) continue;
+
+				const sanitized = sanitizeName(name);
+				callCounts[sanitized] = (callCounts[sanitized] || 0) + 1;
+
+				// 1. Identical signature check (same tool + same arguments)
+				const argsStr = tc.function?.arguments || '{}';
+				const signature = `${name}:${argsStr}`;
+				if (lastSignature === signature) {
+					consecutiveLoopDetected = true;
+				}
+				lastSignature = signature;
+
+				// 2. Consecutive same tool name check (≥3 consecutive calls to same tool)
+				if (lastToolName === sanitized) {
+					consecutiveToolNameCount++;
+					if (consecutiveToolNameCount >= 3) {
+						consecutiveToolLoopDetected = true;
+					}
+				} else {
+					consecutiveToolNameCount = 1;
+				}
+				lastToolName = sanitized;
+			}
+		}
+	}
+
+	const modified = { ...body };
+
+	if (consecutiveLoopDetected || consecutiveToolLoopDetected) {
+		// Circuit breaker: remove all tools to stop the loop
+		console.warn('[DeepSeek] Anti-loop circuit breaker activated. Removing all tools.');
+		delete modified.tools;
+	} else {
+		// Filter tools: remove one-shot tools that already ran, and tools at max
+		const filtered = modified.tools.filter((t: any) => {
+			const name = t.function?.name;
+			if (!name) return true;
+			const sanitized = sanitizeName(name);
+
+			// One-shot check
+			if (oneShotSet.has(sanitized) && (callCounts[sanitized] || 0) >= 1) {
+				console.warn(`[DeepSeek] One-shot tool "${name}" already used. Removing from available tools.`);
+				return false;
+			}
+
+			// Max executions check
+			if ((callCounts[sanitized] || 0) >= maxToolExecutions) {
+				console.warn(`[DeepSeek] Tool "${name}" reached max executions (${maxToolExecutions}). Removing.`);
+				return false;
+			}
+
+			return true;
+		});
+
+		if (filtered.length === 0) {
+			console.warn('[DeepSeek] No tools remaining after filtering. Removing tools option.');
+			delete modified.tools;
+		} else {
+			modified.tools = filtered;
+		}
+	}
+
+	// Enforce strict JSON schemas on remaining tools
+	if (modified.tools && Array.isArray(modified.tools)) {
+		modified.tools = modified.tools.map((t: any) => {
+			if (t.function?.parameters) {
+				return {
+					...t,
+					strict: true,
+					function: {
+						...t.function,
+						parameters: enforceStrictSchema(t.function.parameters),
+					},
+				};
+			}
+			return t;
+		});
+	}
+
+	return modified;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Factory: Create a custom fetch function that intercepts API requests
+// to apply tool filtering at the HTTP level.
+// ─────────────────────────────────────────────────────────────────────────────
+function createToolFilteringFetch(
+	oneShotToolsList: string[],
+	maxToolExecutions: number,
+): typeof globalThis.fetch {
+	const hasFiltering = oneShotToolsList.length > 0 || maxToolExecutions < Infinity;
+
+	return async function toolFilteringFetch(
+		input: RequestInfo | URL,
+		init?: RequestInit,
+	): Promise<Response> {
+		// Only intercept POST requests with a body (chat completions)
+		if (hasFiltering && init?.method === 'POST' && init.body && typeof init.body === 'string') {
+			try {
+				const body = JSON.parse(init.body);
+				if (body.tools && body.messages) {
+					const filtered = filterToolsInRequestBody(body, oneShotToolsList, maxToolExecutions);
+					init = { ...init, body: JSON.stringify(filtered) };
+				}
+			} catch (_) {
+				// If JSON parsing fails, pass through unchanged
+			}
+		}
+		return globalThis.fetch(input, init);
+	};
+}
+
 export class LmChatDeepSeek implements INodeType {
 	description: INodeTypeDescription = {
 		displayName: 'DeepSeek Chat Model (Preserved Reasoning)',
@@ -191,6 +366,7 @@ export class LmChatDeepSeek implements INodeType {
 
 		const options = this.getNodeParameter('options', itemIndex, {}) as {
 			oneShotTools?: string;
+			maxToolExecutions?: number;
 			frequencyPenalty?: number;
 			maxTokens?: number;
 			responseFormat?: 'text' | 'json_object';
@@ -206,6 +382,8 @@ export class LmChatDeepSeek implements INodeType {
 			.split(',')
 			.map(t => t.trim())
 			.filter(t => t.length > 0);
+
+		const maxToolExecutionsVal = options.maxToolExecutions !== undefined ? options.maxToolExecutions : 3;
 
 		const modelKwargs: Record<string, any> = {};
 		if (thinkingEnabled) {
@@ -508,7 +686,10 @@ export class LmChatDeepSeek implements INodeType {
 			presencePenalty: options.presencePenalty ?? 0,
 			timeout: options.timeout ?? 360000,
 			maxRetries: options.maxRetries ?? 2,
-			configuration: { baseURL: baseUrl },
+			configuration: {
+				baseURL: baseUrl,
+				fetch: createToolFilteringFetch(oneShotToolsList, maxToolExecutionsVal),
+			},
 			modelKwargs,
 			callbacks: [new N8nLlmTracing(this)],
 			oneShotToolsList,
