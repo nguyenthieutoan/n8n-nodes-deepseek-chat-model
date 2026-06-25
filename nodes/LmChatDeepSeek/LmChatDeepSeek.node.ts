@@ -246,6 +246,17 @@ export class LmChatDeepSeek implements INodeType {
 
 		const maxToolExecutionsVal = options.maxToolExecutions !== undefined ? options.maxToolExecutions : 3;
 
+		// ══════════ DIAGNOSTIC: Verify parameter parsing ══════════
+		console.log('╔══════════════════════════════════════════════╗');
+		console.log('║ [DeepSeek] INSTANCE CREATION                 ║');
+		console.log('╠══════════════════════════════════════════════╣');
+		console.log('║ oneShotToolsList:', JSON.stringify(oneShotToolsList));
+		console.log('║ maxToolExecutionsVal:', maxToolExecutionsVal);
+		console.log('║ raw options.oneShotTools:', JSON.stringify(options.oneShotTools));
+		console.log('║ raw options.maxToolExecutions:', options.maxToolExecutions);
+		console.log('║ typeof options.oneShotTools:', typeof options.oneShotTools);
+		console.log('╚══════════════════════════════════════════════╝');
+
 		const modelKwargs: Record<string, any> = {};
 		if (thinkingEnabled) {
 			const thinkingEffort = this.getNodeParameter('thinkingEffort', itemIndex, 'high') as string;
@@ -298,7 +309,67 @@ export class LmChatDeepSeek implements INodeType {
 				this.HumanMessageClass = HumanMessageClass;
 			}
 
+			// ── DIAGNOSTIC: Override invoke() to capture full call flow ──
+			async invoke(input: any, options?: any): Promise<any> {
+				console.log('╔══════════════════════════════════════════════╗');
+				console.log('║ [DeepSeek] invoke() CALLED                   ║');
+				console.log('╠══════════════════════════════════════════════╣');
+				console.log('║ input type:', typeof input, Array.isArray(input) ? `(array len=${input.length})` : '');
+				console.log('║ options keys:', options ? Object.keys(options) : 'NULL');
+				console.log('║ options?.tools?:', !!(options?.tools));
+				if (options?.tools && Array.isArray(options.tools)) {
+					console.log('║ options.tools count:', options.tools.length);
+					console.log('║ options.tools[0] keys:', options.tools[0] ? Object.keys(options.tools[0]) : 'EMPTY');
+				}
+				console.log('║ Closure oneShotToolsList:', JSON.stringify(oneShotToolsList));
+				console.log('║ Closure maxToolExecutionsVal:', maxToolExecutionsVal);
+				console.log('╚══════════════════════════════════════════════╝');
+				return super.invoke(input, options);
+			}
+
 			async _generate(messages: any[], callOptions: any, runManager?: any): Promise<any> {
+				// ── DIAGNOSTIC: Verify _generate is called + inspect callOptions ──
+				console.log('╔══════════════════════════════════════════════╗');
+				console.log('║ [DeepSeek] _generate() CALLED                ║');
+				console.log('╠══════════════════════════════════════════════╣');
+				console.log('║ Closure oneShotToolsList:', JSON.stringify(oneShotToolsList));
+				console.log('║ Closure maxToolExecutionsVal:', maxToolExecutionsVal);
+				console.log('║ Instance this.oneShotToolsList:', JSON.stringify(this.oneShotToolsList));
+				console.log('║ Messages count:', messages.length);
+				console.log('║ callOptions keys:', callOptions ? Object.keys(callOptions) : 'NULL');
+				console.log('║ callOptions.tools?:', !!(callOptions?.tools),
+					'type:', typeof callOptions?.tools,
+					'isArray:', Array.isArray(callOptions?.tools));
+				if (Array.isArray(callOptions?.tools) && callOptions.tools.length > 0) {
+					const t0 = callOptions.tools[0];
+					console.log('║ tools count:', callOptions.tools.length);
+					console.log('║ tools[0] keys:', Object.keys(t0));
+					console.log('║ tools[0].type:', t0.type);
+					console.log('║ tools[0].function?.name:', t0.function?.name);
+					console.log('║ tools[0].name:', t0.name);
+					console.log('║ ALL tool names:', callOptions.tools.map((t: any) =>
+						t.function?.name || t.name || 'UNKNOWN').join(', '));
+				}
+				// Check this.kwargs (where bindTools may store tools)
+				const selfKwargs = (this as any).kwargs;
+				console.log('║ this.kwargs keys:', selfKwargs ? Object.keys(selfKwargs) : 'NO_KWARGS');
+				if (selfKwargs?.tools) {
+					console.log('║ this.kwargs.tools count:', selfKwargs.tools.length);
+				}
+				// Check message types for tool call history
+				for (let i = 0; i < messages.length; i++) {
+					const msg = messages[i];
+					const msgType = msg._getType?.() || msg.constructor?.name || typeof msg;
+					const hasToolCalls = !!(msg.tool_calls?.length || msg.additional_kwargs?.tool_calls?.length);
+					if (hasToolCalls) {
+						const tcNames = (msg.tool_calls || msg.additional_kwargs?.tool_calls || []).map(
+							(tc: any) => tc.name || tc.function?.name || 'UNKNOWN'
+						);
+						console.log(`║ msg[${i}] type=${msgType} TOOL_CALLS=[${tcNames.join(',')}]`);
+					}
+				}
+				console.log('╚══════════════════════════════════════════════╝');
+
 				const patchedMessages = DeepSeekCorrected.injectReasoning(messages, thinkingIsEnabled);
 				const {
 					patchedMessages: finalMessages,
@@ -320,6 +391,16 @@ export class LmChatDeepSeek implements INodeType {
 			}
 
 			async *_streamResponseChunks(messages: any[], callOptions: any, runManager?: any): AsyncGenerator<any> {
+				console.log('╔══════════════════════════════════════════════╗');
+				console.log('║ [DeepSeek] _streamResponseChunks() CALLED    ║');
+				console.log('║ Closure oneShotToolsList:', JSON.stringify(oneShotToolsList));
+				console.log('║ callOptions.tools?:', !!(callOptions?.tools));
+				if (Array.isArray(callOptions?.tools)) {
+					console.log('║ ALL tool names:', callOptions.tools.map((t: any) =>
+						t.function?.name || t.name || 'UNKNOWN').join(', '));
+				}
+				console.log('╚══════════════════════════════════════════════╝');
+
 				const patchedMessages = DeepSeekCorrected.injectReasoning(messages, thinkingIsEnabled);
 				const {
 					patchedMessages: finalMessages,
