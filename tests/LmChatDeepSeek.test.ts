@@ -114,4 +114,123 @@ describe('LmChatDeepSeek Community Node', () => {
 		expect(patchedMessages[0].reasoning_content).toBe('This is my internal thinking.');
 		expect(patchedMessages[0].additional_kwargs.reasoning_content).toBe('This is my internal thinking.');
 	});
+
+	test('Anti-Loop and Execution Caps: patchMessagesAndCallOptions logic', async () => {
+		const result = (await node.supplyData.call(mockSupplyDataContext, 0)) as any;
+		const DeepSeekCorrectedClass = result.response.constructor as any;
+
+		class MockHumanMessage {
+			content: string;
+			constructor(content: string) {
+				this.content = content;
+			}
+		}
+
+		// Helper to construct AI messages with tool calls
+		const makeAIMessage = (toolCalls: Array<{ name: string, args?: any }>) => ({
+			_getType: () => 'ai',
+			tool_calls: toolCalls.map((tc, i) => ({
+				id: `call_${i}`,
+				name: tc.name,
+				args: tc.args || {}
+			}))
+		});
+
+		// 1. One-Shot limits check
+		{
+			const messages = [
+				makeAIMessage([{ name: 'one_shot_tool', args: { query: 'test' } }])
+			];
+			const callOptions = {
+				tools: [
+					{ function: { name: 'one_shot_tool', parameters: { type: 'object', properties: { query: { type: 'string' } } } } },
+					{ function: { name: 'regular_tool', parameters: { type: 'object', properties: { query: { type: 'string' } } } } }
+				]
+			};
+			const res = DeepSeekCorrectedClass.patchMessagesAndCallOptions(
+				messages,
+				callOptions,
+				['one_shot_tool'],
+				3,
+				MockHumanMessage
+			);
+			expect(res.patchedCallOptions.tools).toBeDefined();
+			// one_shot_tool should be filtered out
+			expect(res.patchedCallOptions.tools.map((t: any) => t.function.name)).toEqual(['regular_tool']);
+		}
+
+		// 2. Max executions check
+		{
+			const messages = [
+				makeAIMessage([{ name: 'test_tool', args: { q: '1' } }]),
+				makeAIMessage([{ name: 'test_tool', args: { q: '2' } }]),
+				makeAIMessage([{ name: 'test_tool', args: { q: '3' } }])
+			];
+			const callOptions = {
+				tools: [
+					{ function: { name: 'test_tool', parameters: { type: 'object', properties: { q: { type: 'string' } } } } }
+				]
+			};
+			const res = DeepSeekCorrectedClass.patchMessagesAndCallOptions(
+				messages,
+				callOptions,
+				[],
+				3, // maxToolExecutions limit is 3
+				MockHumanMessage
+			);
+			// test_tool should be filtered out because it reached 3 executions
+			expect(res.patchedCallOptions.tools).toBeUndefined();
+		}
+
+		// 3. Consecutive identical signature check (2 times)
+		{
+			const messages = [
+				makeAIMessage([{ name: 'test_tool', args: { q: 'same' } }]),
+				makeAIMessage([{ name: 'test_tool', args: { q: 'same' } }])
+			];
+			const callOptions = {
+				tools: [
+					{ function: { name: 'test_tool', parameters: { type: 'object', properties: { q: { type: 'string' } } } } }
+				]
+			};
+			const res = DeepSeekCorrectedClass.patchMessagesAndCallOptions(
+				messages,
+				callOptions,
+				[],
+				5,
+				MockHumanMessage
+			);
+			// consecutive identical signature should trigger circuit breaker (system warning inserted and tools deleted)
+			expect(res.patchedMessages.length).toBe(3);
+			expect(res.patchedMessages[2]).toBeInstanceOf(MockHumanMessage);
+			expect(res.patchedMessages[2].content).toContain('vòng lặp gọi công cụ với các tham số trùng lặp');
+			expect(res.patchedCallOptions.tools).toBeUndefined();
+		}
+
+		// 4. Consecutive same tool name check (3 times)
+		{
+			const messages = [
+				makeAIMessage([{ name: 'test_tool', args: { q: '1' } }]),
+				makeAIMessage([{ name: 'test_tool', args: { q: '2' } }]),
+				makeAIMessage([{ name: 'test_tool', args: { q: '3' } }])
+			];
+			const callOptions = {
+				tools: [
+					{ function: { name: 'test_tool', parameters: { type: 'object', properties: { q: { type: 'string' } } } } }
+				]
+			};
+			const res = DeepSeekCorrectedClass.patchMessagesAndCallOptions(
+				messages,
+				callOptions,
+				[],
+				5, // maxToolExecutions = 5, so it's not execution cap, but consecutive name cap
+				MockHumanMessage
+			);
+			// should trigger circuit breaker because test_tool was called 3 times consecutively
+			expect(res.patchedMessages.length).toBe(4);
+			expect(res.patchedMessages[3]).toBeInstanceOf(MockHumanMessage);
+			expect(res.patchedMessages[3].content).toContain('lặp chuỗi');
+			expect(res.patchedCallOptions.tools).toBeUndefined();
+		}
+	});
 });

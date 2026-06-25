@@ -132,6 +132,13 @@ export class LmChatDeepSeek implements INodeType {
 						description: 'List of tool names that should only be executed at most once per execution.',
 					},
 					{
+						displayName: 'Max Tool Executions',
+						name: 'maxToolExecutions',
+						type: 'number',
+						default: 3,
+						description: 'The maximum number of times any single tool can be executed per run. Prevents loops when the AI changes query parameters repeatedly.',
+					},
+					{
 						displayName: 'Frequency Penalty',
 						name: 'frequencyPenalty',
 						type: 'number',
@@ -211,6 +218,7 @@ export class LmChatDeepSeek implements INodeType {
 			oneShotTools?: {
 				tools?: Array<{ name: string }>;
 			};
+			maxToolExecutions?: number;
 			frequencyPenalty?: number;
 			maxTokens?: number;
 			responseFormat?: 'text' | 'json_object';
@@ -225,6 +233,8 @@ export class LmChatDeepSeek implements INodeType {
 		const oneShotToolsList = (oneShotToolsRaw.tools || [])
 			.map(item => item.name ? item.name.trim() : '')
 			.filter(name => name.length > 0);
+
+		const maxToolExecutionsVal = options.maxToolExecutions !== undefined ? options.maxToolExecutions : 3;
 
 		const modelKwargs: Record<string, any> = {};
 		if (thinkingEnabled) {
@@ -267,12 +277,14 @@ export class LmChatDeepSeek implements INodeType {
 		 */
 		class DeepSeekCorrected extends ChatOpenAI {
 			oneShotToolsList: string[] = [];
+			maxToolExecutions: number = 3;
 			HumanMessageClass: any;
 
 			constructor(fields: any) {
-				const { oneShotToolsList, HumanMessageClass, ...rest } = fields;
+				const { oneShotToolsList, maxToolExecutions, HumanMessageClass, ...rest } = fields;
 				super(rest);
 				this.oneShotToolsList = oneShotToolsList || [];
+				this.maxToolExecutions = maxToolExecutions !== undefined ? maxToolExecutions : 3;
 				this.HumanMessageClass = HumanMessageClass;
 			}
 
@@ -285,6 +297,7 @@ export class LmChatDeepSeek implements INodeType {
 					patchedMessages,
 					callOptions,
 					this.oneShotToolsList,
+					this.maxToolExecutions,
 					this.HumanMessageClass
 				);
 
@@ -305,6 +318,7 @@ export class LmChatDeepSeek implements INodeType {
 					patchedMessages,
 					callOptions,
 					this.oneShotToolsList,
+					this.maxToolExecutions,
 					this.HumanMessageClass
 				);
 				yield* super._streamResponseChunks(finalMessages, patchedCallOptions, runManager);
@@ -358,10 +372,12 @@ export class LmChatDeepSeek implements INodeType {
 				messages: any[],
 				callOptions: any,
 				oneShotToolsList: string[],
+				maxToolExecutions: number,
 				HumanMessageClass: any
 			): { patchedMessages: any[]; patchedCallOptions: any } {
 				console.log('--- DeepSeek patchMessagesAndCallOptions START ---');
 				console.log('oneShotToolsList:', oneShotToolsList);
+				console.log('maxToolExecutions limit:', maxToolExecutions);
 				console.log('Number of messages in history:', messages.length);
 
 				const patchedMessages = [...messages];
@@ -375,6 +391,10 @@ export class LmChatDeepSeek implements INodeType {
 					const callCounts: Record<string, number> = {};
 					let lastSignature: string | null = null;
 					let consecutiveLoopDetected = false;
+
+					let consecutiveToolNameCount = 0;
+					let lastToolName: string | null = null;
+					let consecutiveToolLoopDetected = false;
 
 					for (let index = 0; index < messages.length; index++) {
 						const msg = messages[index];
@@ -416,23 +436,37 @@ export class LmChatDeepSeek implements INodeType {
 								const signature = `${tc.name}:${argsStr}`;
 								console.log(`Analyzed tool call: ${tc.name}, signature: ${signature}, lastSignature was: ${lastSignature}`);
 								
+								// 1. Identical signature check (tool name + exact same arguments)
 								if (lastSignature === signature) {
 									consecutiveLoopDetected = true;
 									console.log(`[LOOP DETECTED] Consecutive loop signature match: ${signature}`);
 								}
 								lastSignature = signature;
+
+								// 2. Consecutive same tool name check (same tool called consecutively 3 times, even with changing queries)
+								if (lastToolName === sanitizedName) {
+									consecutiveToolNameCount++;
+									if (consecutiveToolNameCount >= 3) {
+										consecutiveToolLoopDetected = true;
+										console.log(`[LOOP DETECTED] Consecutive same tool name run threshold hit: ${tc.name}`);
+									}
+								} else {
+									consecutiveToolNameCount = 1;
+								}
+								lastToolName = sanitizedName;
 							}
 						}
 					}
 
 					console.log('Final callCounts:', callCounts);
 					console.log('consecutiveLoopDetected:', consecutiveLoopDetected);
+					console.log('consecutiveToolLoopDetected:', consecutiveToolLoopDetected);
 
-					if (consecutiveLoopDetected) {
+					if (consecutiveLoopDetected || consecutiveToolLoopDetected) {
 						console.log('Applying consecutive loop ngắt mạch...');
 						patchedMessages.push(
 							new HumanMessageClass(
-								'Yêu cầu hệ thống khẩn cấp: Bạn đang bị kẹt trong một vòng lặp gọi công cụ với các tham số trùng lặp. Ngay lập tức ngừng việc gọi thêm bất kỳ công cụ nào và sử dụng các thông tin đã thu thập trước đó để đưa ra câu trả lời trực tiếp cho tôi.'
+								'Yêu cầu hệ thống khẩn cấp: Bạn đang bị kẹt trong một vòng lặp gọi công cụ với các tham số trùng lặp hoặc lặp chuỗi. Ngay lập tức ngừng việc gọi thêm bất kỳ công cụ nào và sử dụng các thông tin đã thu thập trước đó để đưa ra câu trả lời trực tiếp cho tôi.'
 							)
 						);
 						delete patchedCallOptions.tools;
@@ -443,6 +477,8 @@ export class LmChatDeepSeek implements INodeType {
 								const name = t.function?.name;
 								if (name) {
 									const sanitizedName = DeepSeekCorrected.sanitizeNameForComparison(name);
+									
+									// 1. One-Shot Limit check
 									if (oneShotToolsSet.has(sanitizedName)) {
 										const count = callCounts[sanitizedName] || 0;
 										console.log(`Checking one-shot tool ${name} (sanitized: ${sanitizedName}), count in history: ${count}`);
@@ -450,6 +486,13 @@ export class LmChatDeepSeek implements INodeType {
 											console.log(`Filtering out one-shot tool ${name} because count ${count} >= 1`);
 											return false; // Disable this tool since it already ran once
 										}
+									}
+
+									// 2. Max Executions Ceiling check
+									const count = callCounts[sanitizedName] || 0;
+									if (count >= maxToolExecutions) {
+										console.log(`Filtering out tool ${name} because it reached max executions limit of ${maxToolExecutions} (current count: ${count})`);
+										return false;
 									}
 								}
 								return true;
@@ -531,6 +574,7 @@ export class LmChatDeepSeek implements INodeType {
 			modelKwargs,
 			callbacks: [new N8nLlmTracing(this)],
 			oneShotToolsList,
+			maxToolExecutions: maxToolExecutionsVal,
 			HumanMessageClass: HumanMessage,
 		});
 
