@@ -265,8 +265,8 @@ export class LmChatDeepSeek implements INodeType {
 				} = DeepSeekCorrected.patchMessagesAndCallOptions(
 					patchedMessages,
 					callOptions,
-					this.oneShotToolsList,
-					this.HumanMessageClass
+					oneShotToolsList,
+					HumanMessage
 				);
 
 				const response = await super._generate(finalMessages, patchedCallOptions, runManager);
@@ -285,8 +285,8 @@ export class LmChatDeepSeek implements INodeType {
 				} = DeepSeekCorrected.patchMessagesAndCallOptions(
 					patchedMessages,
 					callOptions,
-					this.oneShotToolsList,
-					this.HumanMessageClass
+					oneShotToolsList,
+					HumanMessage
 				);
 				yield* super._streamResponseChunks(finalMessages, patchedCallOptions, runManager);
 			}
@@ -329,7 +329,7 @@ export class LmChatDeepSeek implements INodeType {
 			 */
 			static sanitizeNameForComparison(name: string): string {
 				if (!name) return '';
-				return name.toLowerCase().replace(/[^a-z0-9]/g, '_').replace(/_+/g, '_').trim();
+				return name.toLowerCase().replace(/[^a-z0-9]/g, '').trim();
 			}
 
 			/**
