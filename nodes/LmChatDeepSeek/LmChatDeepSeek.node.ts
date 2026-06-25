@@ -327,6 +327,14 @@ export class LmChatDeepSeek implements INodeType {
 			/**
 			 * Implements strict JSON Schema validation and limits tool execution.
 			 */
+			static sanitizeNameForComparison(name: string): string {
+				if (!name) return '';
+				return name.toLowerCase().replace(/[^a-z0-9]/g, '_').replace(/_+/g, '_').trim();
+			}
+
+			/**
+			 * Implements strict JSON Schema validation and limits tool execution.
+			 */
 			static patchMessagesAndCallOptions(
 				messages: any[],
 				callOptions: any,
@@ -337,7 +345,9 @@ export class LmChatDeepSeek implements INodeType {
 				const patchedCallOptions = callOptions ? { ...callOptions } : {};
 
 				if (patchedCallOptions.tools && Array.isArray(patchedCallOptions.tools)) {
-					const oneShotToolsSet = new Set(oneShotToolsList);
+					const oneShotToolsSet = new Set(
+						oneShotToolsList.map((t: string) => DeepSeekCorrected.sanitizeNameForComparison(t))
+					);
 					const callCounts: Record<string, number> = {};
 					const signatureCounts: Record<string, number> = {};
 					let lastSignature: string | null = null;
@@ -367,7 +377,8 @@ export class LmChatDeepSeek implements INodeType {
 
 						for (const tc of toolCalls) {
 							if (tc.name) {
-								callCounts[tc.name] = (callCounts[tc.name] || 0) + 1;
+								const sanitizedName = DeepSeekCorrected.sanitizeNameForComparison(tc.name);
+								callCounts[sanitizedName] = (callCounts[sanitizedName] || 0) + 1;
 
 								// Fingerprint for the signature check (tool name + hash of stringified arguments)
 								const argsStr = tc.args ? JSON.stringify(tc.args) : '{}';
@@ -397,10 +408,13 @@ export class LmChatDeepSeek implements INodeType {
 						patchedCallOptions.tools = patchedCallOptions.tools
 							.filter((t: any) => {
 								const name = t.function?.name;
-								if (name && oneShotToolsSet.has(name)) {
-									const count = callCounts[name] || 0;
-									if (count >= 1) {
-										return false; // Disable this tool since it already ran once
+								if (name) {
+									const sanitizedName = DeepSeekCorrected.sanitizeNameForComparison(name);
+									if (oneShotToolsSet.has(sanitizedName)) {
+										const count = callCounts[sanitizedName] || 0;
+										if (count >= 1) {
+											return false; // Disable this tool since it already ran once
+										}
 									}
 								}
 								return true;
