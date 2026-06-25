@@ -96,6 +96,18 @@ describe('LmChatDeepSeek Community Node', () => {
 		expect(result.response.config.temperature).toBe(0.9);
 	});
 
+	test('Backward Compatibility: should successfully parse string-based oneShotTools', async () => {
+		mockSupplyDataContext.getNodeParameter = jest.fn().mockImplementation((paramName, index, fallback) => {
+			if (paramName === 'model') return 'deepseek-v4-flash';
+			if (paramName === 'thinkingEnabled') return false;
+			if (paramName === 'options') return { oneShotTools: 'old_tool_1, old_tool_2' };
+			return fallback;
+		});
+
+		const result = (await node.supplyData.call(mockSupplyDataContext, 0)) as any;
+		expect(result.response.oneShotToolsList).toEqual(['old_tool_1', 'old_tool_2']);
+	});
+
 	test('Thinking Mode: should preserve and inject reasoning_content into assistant messages', async () => {
 		const result = (await node.supplyData.call(mockSupplyDataContext, 0)) as any;
 		const deepseekModel = result.response as any;

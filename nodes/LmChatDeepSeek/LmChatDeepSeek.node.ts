@@ -215,7 +215,7 @@ export class LmChatDeepSeek implements INodeType {
 		const thinkingEnabled = this.getNodeParameter('thinkingEnabled', itemIndex, false) as boolean;
 
 		const options = this.getNodeParameter('options', itemIndex, {}) as {
-			oneShotTools?: {
+			oneShotTools?: string | {
 				tools?: Array<{ name: string }>;
 			};
 			maxToolExecutions?: number;
@@ -229,10 +229,20 @@ export class LmChatDeepSeek implements INodeType {
 			topP?: number;
 		};
 
-		const oneShotToolsRaw = options.oneShotTools || {};
-		const oneShotToolsList = (oneShotToolsRaw.tools || [])
-			.map(item => item.name ? item.name.trim() : '')
-			.filter(name => name.length > 0);
+		let oneShotToolsList: string[] = [];
+		if (options.oneShotTools) {
+			if (typeof options.oneShotTools === 'string') {
+				oneShotToolsList = options.oneShotTools
+					.split(',')
+					.map(name => name.trim())
+					.filter(name => name.length > 0);
+			} else if (typeof options.oneShotTools === 'object' && options.oneShotTools !== null) {
+				const tools = (options.oneShotTools as any).tools || [];
+				oneShotToolsList = tools
+					.map((item: any) => item.name ? String(item.name).trim() : '')
+					.filter((name: string) => name.length > 0);
+			}
+		}
 
 		const maxToolExecutionsVal = options.maxToolExecutions !== undefined ? options.maxToolExecutions : 3;
 
