@@ -64,13 +64,11 @@ export class LmChatDeepSeek implements INodeType {
 				name: 'model',
 				type: 'options',
 				options: [
-					{ name: 'deepseek-chat', value: 'deepseek-chat' },
-					{ name: 'deepseek-reasoner', value: 'deepseek-reasoner' },
-					{ name: 'deepseek-v4-pro', value: 'deepseek-v4-pro' },
 					{ name: 'deepseek-v4-flash', value: 'deepseek-v4-flash' },
+					{ name: 'deepseek-v4-pro', value: 'deepseek-v4-pro' },
 					{ name: 'Custom Model', value: 'custom' },
 				],
-				default: 'deepseek-chat',
+				default: 'deepseek-v4-flash',
 				description: 'Select the DeepSeek model version to use.',
 			},
 			{
@@ -85,7 +83,7 @@ export class LmChatDeepSeek implements INodeType {
 				displayName: 'Thinking Mode',
 				name: 'thinkingEnabled',
 				type: 'boolean',
-				default: true,
+				default: false,
 				description: 'Enable internal chain-of-thought thinking before responding.',
 			},
 			{
@@ -107,6 +105,14 @@ export class LmChatDeepSeek implements INodeType {
 				placeholder: 'Add Option',
 				default: {},
 				options: [
+					{
+						displayName: 'One-Shot Tools',
+						name: 'oneShotTools',
+						type: 'string',
+						default: '',
+						placeholder: 'rag_tool, send_message',
+						description: 'Comma-separated list of tool names that can only be called at most once during execution.',
+					},
 					{
 						displayName: 'Frequency Penalty',
 						name: 'frequencyPenalty',
@@ -181,9 +187,10 @@ export class LmChatDeepSeek implements INodeType {
 		const modelParameter = this.getNodeParameter('model', itemIndex) as string;
 		const customModel = this.getNodeParameter('customModel', itemIndex, '') as string;
 		const modelName = modelParameter === 'custom' ? customModel : modelParameter;
-		const thinkingEnabled = this.getNodeParameter('thinkingEnabled', itemIndex, true) as boolean;
+		const thinkingEnabled = this.getNodeParameter('thinkingEnabled', itemIndex, false) as boolean;
 
 		const options = this.getNodeParameter('options', itemIndex, {}) as {
+			oneShotTools?: string;
 			frequencyPenalty?: number;
 			maxTokens?: number;
 			responseFormat?: 'text' | 'json_object';
@@ -194,12 +201,21 @@ export class LmChatDeepSeek implements INodeType {
 			topP?: number;
 		};
 
-		const modelKwargs: Record<string, any> = {
-			thinking: { type: thinkingEnabled ? 'enabled' : 'disabled' },
-		};
+		const oneShotToolsRaw = options.oneShotTools || '';
+		const oneShotToolsList = oneShotToolsRaw
+			.split(',')
+			.map(t => t.trim())
+			.filter(t => t.length > 0);
+
+		const modelKwargs: Record<string, any> = {};
 		if (thinkingEnabled) {
 			const thinkingEffort = this.getNodeParameter('thinkingEffort', itemIndex, 'high') as string;
+			modelKwargs.thinking = { type: 'enabled' };
+			modelKwargs.thinking_mode = thinkingEffort === 'max' ? 'think_max' : 'think_high';
 			modelKwargs.reasoning_effort = thinkingEffort;
+		} else {
+			modelKwargs.thinking = { type: 'disabled' };
+			modelKwargs.thinking_mode = 'non-think';
 		}
 		if (options.responseFormat === 'json_object') {
 			modelKwargs.response_format = { type: 'json_object' };
@@ -214,6 +230,7 @@ export class LmChatDeepSeek implements INodeType {
 		// ─── CRITICAL: load from n8n's OWN runtime, same instance as n8n internals ───
 		const { ChatOpenAI } = requireN8nDependency('@langchain/openai');
 		const { N8nLlmTracing } = requireN8nDependency('@n8n/ai-utilities');
+		const { HumanMessage } = requireN8nDependency('@langchain/core/messages');
 
 		const thinkingIsEnabled = thinkingEnabled; // capture for closure
 
@@ -227,31 +244,51 @@ export class LmChatDeepSeek implements INodeType {
 		 *     in the message history for the next tool-call loop iteration.
 		 *  2. Inject reasoning_content back into outgoing assistant messages
 		 *     (required by DeepSeek API: "must be passed back to the API").
+		 *  3. Process call options to enforce strict schema structure and limit tool execution.
 		 */
 		class DeepSeekCorrected extends ChatOpenAI {
+			oneShotToolsList: string[] = [];
+			HumanMessageClass: any;
 
-			constructor(...args: any[]) {
-				super(...args);
+			constructor(fields: any) {
+				const { oneShotToolsList, HumanMessageClass, ...rest } = fields;
+				super(rest);
+				this.oneShotToolsList = oneShotToolsList || [];
+				this.HumanMessageClass = HumanMessageClass;
 			}
 
-
 			async _generate(messages: any[], callOptions: any, runManager?: any): Promise<any> {
-				// Inject reasoning_content into assistant messages before sending
 				const patchedMessages = DeepSeekCorrected.injectReasoning(messages, thinkingIsEnabled);
-				const response = await super._generate(patchedMessages, callOptions, runManager);
-				// Ensure reasoning_content is preserved on the returned message
+				const {
+					patchedMessages: finalMessages,
+					patchedCallOptions,
+				} = DeepSeekCorrected.patchMessagesAndCallOptions(
+					patchedMessages,
+					callOptions,
+					this.oneShotToolsList,
+					this.HumanMessageClass
+				);
+
+				const response = await super._generate(finalMessages, patchedCallOptions, runManager);
 				const gen = response?.generations?.[0];
 				if (gen?.message) {
 					gen.message.additional_kwargs = gen.message.additional_kwargs ?? {};
-					// reasoning_content already set by API response via additional_kwargs
 				}
 				return response;
 			}
 
-
 			async *_streamResponseChunks(messages: any[], callOptions: any, runManager?: any): AsyncGenerator<any> {
 				const patchedMessages = DeepSeekCorrected.injectReasoning(messages, thinkingIsEnabled);
-				yield* super._streamResponseChunks(patchedMessages, callOptions, runManager);
+				const {
+					patchedMessages: finalMessages,
+					patchedCallOptions,
+				} = DeepSeekCorrected.patchMessagesAndCallOptions(
+					patchedMessages,
+					callOptions,
+					this.oneShotToolsList,
+					this.HumanMessageClass
+				);
+				yield* super._streamResponseChunks(finalMessages, patchedCallOptions, runManager);
 			}
 
 			/**
@@ -268,28 +305,162 @@ export class LmChatDeepSeek implements INodeType {
 						(msg._getType?.() === 'ai' || msg.constructor?.name === 'AIMessage') &&
 						msg.additional_kwargs?.reasoning_content
 					) {
-						// Return a shallow copy augmented with reasoning_content
-						// so LangChain's own serialization is not disturbed
-						return {
-							...msg,
-							// Provide a patched _getType so converters still work
-							_getType: msg._getType?.bind(msg),
-							// Tell the OpenAI client to include reasoning_content
-							// by attaching it where convertMessagesToOpenAIParams can read it
-							additional_kwargs: {
-								...msg.additional_kwargs,
-								// The underlying @langchain/openai convertMessagesToOpenAIParams
-								// passes through additional_kwargs fields to the API body
-							},
-							// Direct property that DeepSeek's OpenAI-compat layer reads
-							reasoning_content: msg.additional_kwargs.reasoning_content,
+						// Create a clone preserving the prototype to prevent LangChain serialization errors
+						const clone = Object.create(Object.getPrototypeOf(msg));
+						Object.assign(clone, msg);
+						
+						clone.additional_kwargs = {
+							...msg.additional_kwargs,
 						};
+						clone.reasoning_content = msg.additional_kwargs.reasoning_content;
+						
+						if (msg._getType) {
+							clone._getType = msg._getType.bind(clone);
+						}
+						return clone;
 					}
 					return msg;
+					
 				});
 			}
-		}
 
+			/**
+			 * Implements strict JSON Schema validation and limits tool execution.
+			 */
+			static patchMessagesAndCallOptions(
+				messages: any[],
+				callOptions: any,
+				oneShotToolsList: string[],
+				HumanMessageClass: any
+			): { patchedMessages: any[]; patchedCallOptions: any } {
+				const patchedMessages = [...messages];
+				const patchedCallOptions = callOptions ? { ...callOptions } : {};
+
+				if (patchedCallOptions.tools && Array.isArray(patchedCallOptions.tools)) {
+					const oneShotToolsSet = new Set(oneShotToolsList);
+					const callCounts: Record<string, number> = {};
+					const signatureCounts: Record<string, number> = {};
+					let lastSignature: string | null = null;
+					let consecutiveLoopDetected = false;
+
+					for (const msg of messages) {
+						let toolCalls: any[] = [];
+						if (msg.tool_calls && Array.isArray(msg.tool_calls)) {
+							toolCalls = msg.tool_calls.map((tc: any) => ({
+								name: tc.name,
+								args: tc.args || {},
+							}));
+						} else if (msg.additional_kwargs?.tool_calls && Array.isArray(msg.additional_kwargs.tool_calls)) {
+							toolCalls = msg.additional_kwargs.tool_calls.map((tc: any) => {
+								let args = {};
+								if (tc.function?.arguments) {
+									try {
+										args = JSON.parse(tc.function.arguments);
+									} catch (_) {}
+								}
+								return {
+									name: tc.function?.name,
+									args,
+								};
+							});
+						}
+
+						for (const tc of toolCalls) {
+							if (tc.name) {
+								callCounts[tc.name] = (callCounts[tc.name] || 0) + 1;
+
+								// Fingerprint for the signature check (tool name + hash of stringified arguments)
+								const argsStr = tc.args ? JSON.stringify(tc.args) : '{}';
+								const signature = `${tc.name}:${argsStr}`;
+								
+								// Check if this signature is identical to the last one (consecutive duplicate execution)
+								if (lastSignature === signature) {
+									consecutiveLoopDetected = true;
+								}
+								lastSignature = signature;
+							}
+						}
+					}
+
+					// Anti-Loop Circuit Breaker:
+					// If we detect a loop (same tool called consecutively with same parameters)
+					if (consecutiveLoopDetected) {
+						patchedMessages.push(
+							new HumanMessageClass(
+								'Yêu cầu hệ thống khẩn cấp: Bạn đang bị kẹt trong một vòng lặp gọi công cụ với các tham số trùng lặp. Ngay lập tức ngừng việc gọi thêm bất kỳ công cụ nào và sử dụng các thông tin đã thu thập trước đó để đưa ra câu trả lời trực tiếp cho tôi.'
+							)
+						);
+						// Remove all tools to physically prevent another tool call
+						delete patchedCallOptions.tools;
+					} else {
+						// Otherwise, filter out one-shot tools that have already been executed
+						patchedCallOptions.tools = patchedCallOptions.tools
+							.filter((t: any) => {
+								const name = t.function?.name;
+								if (name && oneShotToolsSet.has(name)) {
+									const count = callCounts[name] || 0;
+									if (count >= 1) {
+										return false; // Disable this tool since it already ran once
+									}
+								}
+								return true;
+							})
+							.map((t: any) => {
+								// Enforce strict schemas
+								if (t.function?.parameters) {
+									return {
+										...t,
+										strict: true,
+										function: {
+											...t.function,
+											parameters: DeepSeekCorrected.enforceStrictSchema(t.function.parameters),
+										},
+									};
+								}
+								return t;
+							});
+
+						if (patchedCallOptions.tools.length === 0) {
+							delete patchedCallOptions.tools;
+						}
+					}
+				}
+
+				return { patchedMessages, patchedCallOptions };
+			}
+
+			static enforceStrictSchema(schema: any): any {
+				if (!schema || typeof schema !== 'object') {
+					return schema;
+				}
+
+				if (schema.type === 'object') {
+					const result = { ...schema };
+					result.additionalProperties = false;
+
+					if (result.properties) {
+						result.required = Object.keys(result.properties);
+						const newProperties: Record<string, any> = {};
+						for (const [key, value] of Object.entries(result.properties)) {
+							newProperties[key] = DeepSeekCorrected.enforceStrictSchema(value);
+						}
+						result.properties = newProperties;
+					} else {
+						result.required = [];
+					}
+					return result;
+				}
+
+				if (schema.type === 'array' && schema.items) {
+					return {
+						...schema,
+						items: DeepSeekCorrected.enforceStrictSchema(schema.items),
+					};
+				}
+
+				return schema;
+			}
+		}
 
 		const chatModel = new DeepSeekCorrected({
 			apiKey,
@@ -304,6 +475,8 @@ export class LmChatDeepSeek implements INodeType {
 			configuration: { baseURL: baseUrl },
 			modelKwargs,
 			callbacks: [new N8nLlmTracing(this)],
+			oneShotToolsList,
+			HumanMessageClass: HumanMessage,
 		});
 
 		return { response: chatModel };
