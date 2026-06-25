@@ -341,26 +341,35 @@ export class LmChatDeepSeek implements INodeType {
 				oneShotToolsList: string[],
 				HumanMessageClass: any
 			): { patchedMessages: any[]; patchedCallOptions: any } {
+				console.log('--- DeepSeek patchMessagesAndCallOptions START ---');
+				console.log('oneShotToolsList:', oneShotToolsList);
+				console.log('Number of messages in history:', messages.length);
+
 				const patchedMessages = [...messages];
 				const patchedCallOptions = callOptions ? { ...callOptions } : {};
 
 				if (patchedCallOptions.tools && Array.isArray(patchedCallOptions.tools)) {
+					console.log('Available tools in callOptions:', patchedCallOptions.tools.map((t: any) => t.function?.name));
 					const oneShotToolsSet = new Set(
 						oneShotToolsList.map((t: string) => DeepSeekCorrected.sanitizeNameForComparison(t))
 					);
 					const callCounts: Record<string, number> = {};
-					const signatureCounts: Record<string, number> = {};
 					let lastSignature: string | null = null;
 					let consecutiveLoopDetected = false;
 
-					for (const msg of messages) {
+					for (let index = 0; index < messages.length; index++) {
+						const msg = messages[index];
+						console.log(`Message ${index} type:`, msg.constructor?.name || typeof msg, 'role:', msg._getType?.());
+						
 						let toolCalls: any[] = [];
 						if (msg.tool_calls && Array.isArray(msg.tool_calls)) {
+							console.log(`Message ${index} has msg.tool_calls:`, msg.tool_calls);
 							toolCalls = msg.tool_calls.map((tc: any) => ({
 								name: tc.name,
 								args: tc.args || {},
 							}));
 						} else if (msg.additional_kwargs?.tool_calls && Array.isArray(msg.additional_kwargs.tool_calls)) {
+							console.log(`Message ${index} has msg.additional_kwargs.tool_calls:`, msg.additional_kwargs.tool_calls);
 							toolCalls = msg.additional_kwargs.tool_calls.map((tc: any) => {
 								let args = {};
 								if (tc.function?.arguments) {
@@ -373,6 +382,10 @@ export class LmChatDeepSeek implements INodeType {
 									args,
 								};
 							});
+						} else {
+							if (msg._getType?.() === 'ai' || msg.constructor?.name === 'AIMessage') {
+								console.log(`Message ${index} is AI but has no tool calls. Content:`, msg.content);
+							}
 						}
 
 						for (const tc of toolCalls) {
@@ -380,28 +393,29 @@ export class LmChatDeepSeek implements INodeType {
 								const sanitizedName = DeepSeekCorrected.sanitizeNameForComparison(tc.name);
 								callCounts[sanitizedName] = (callCounts[sanitizedName] || 0) + 1;
 
-								// Fingerprint for the signature check (tool name + hash of stringified arguments)
 								const argsStr = tc.args ? JSON.stringify(tc.args) : '{}';
 								const signature = `${tc.name}:${argsStr}`;
+								console.log(`Analyzed tool call: ${tc.name}, signature: ${signature}, lastSignature was: ${lastSignature}`);
 								
-								// Check if this signature is identical to the last one (consecutive duplicate execution)
 								if (lastSignature === signature) {
 									consecutiveLoopDetected = true;
+									console.log(`[LOOP DETECTED] Consecutive loop signature match: ${signature}`);
 								}
 								lastSignature = signature;
 							}
 						}
 					}
 
-					// Anti-Loop Circuit Breaker:
-					// If we detect a loop (same tool called consecutively with same parameters)
+					console.log('Final callCounts:', callCounts);
+					console.log('consecutiveLoopDetected:', consecutiveLoopDetected);
+
 					if (consecutiveLoopDetected) {
+						console.log('Applying consecutive loop ngắt mạch...');
 						patchedMessages.push(
 							new HumanMessageClass(
 								'Yêu cầu hệ thống khẩn cấp: Bạn đang bị kẹt trong một vòng lặp gọi công cụ với các tham số trùng lặp. Ngay lập tức ngừng việc gọi thêm bất kỳ công cụ nào và sử dụng các thông tin đã thu thập trước đó để đưa ra câu trả lời trực tiếp cho tôi.'
 							)
 						);
-						// Remove all tools to physically prevent another tool call
 						delete patchedCallOptions.tools;
 					} else {
 						// Otherwise, filter out one-shot tools that have already been executed
@@ -412,7 +426,9 @@ export class LmChatDeepSeek implements INodeType {
 									const sanitizedName = DeepSeekCorrected.sanitizeNameForComparison(name);
 									if (oneShotToolsSet.has(sanitizedName)) {
 										const count = callCounts[sanitizedName] || 0;
+										console.log(`Checking one-shot tool ${name} (sanitized: ${sanitizedName}), count in history: ${count}`);
 										if (count >= 1) {
+											console.log(`Filtering out one-shot tool ${name} because count ${count} >= 1`);
 											return false; // Disable this tool since it already ran once
 										}
 									}
@@ -435,11 +451,17 @@ export class LmChatDeepSeek implements INodeType {
 							});
 
 						if (patchedCallOptions.tools.length === 0) {
+							console.log('No tools left after one-shot filtering. Deleting tools option.');
 							delete patchedCallOptions.tools;
+						} else {
+							console.log('Tools remaining after one-shot filtering:', patchedCallOptions.tools.map((t: any) => t.function?.name));
 						}
 					}
+				} else {
+					console.log('No tools present in callOptions.');
 				}
 
+				console.log('--- DeepSeek patchMessagesAndCallOptions END ---');
 				return { patchedMessages, patchedCallOptions };
 			}
 
