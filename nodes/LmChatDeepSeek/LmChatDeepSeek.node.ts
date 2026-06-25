@@ -108,10 +108,28 @@ export class LmChatDeepSeek implements INodeType {
 					{
 						displayName: 'One-Shot Tools',
 						name: 'oneShotTools',
-						type: 'string',
-						default: '',
-						placeholder: 'rag_tool, send_message',
-						description: 'Comma-separated list of tool names that can only be called at most once during execution.',
+						type: 'fixedCollection',
+						default: {},
+						placeholder: 'Add Tool Name',
+						typeOptions: {
+							multipleValues: true,
+						},
+						options: [
+							{
+								displayName: 'Tool Name',
+								name: 'tools',
+								values: [
+									{
+										displayName: 'Tool Name',
+										name: 'name',
+										type: 'string',
+										default: '',
+										description: 'The name of the tool that should only be executed at most once (e.g. "search_document").',
+									},
+								],
+							},
+						],
+						description: 'List of tool names that should only be executed at most once per execution.',
 					},
 					{
 						displayName: 'Frequency Penalty',
@@ -190,7 +208,9 @@ export class LmChatDeepSeek implements INodeType {
 		const thinkingEnabled = this.getNodeParameter('thinkingEnabled', itemIndex, false) as boolean;
 
 		const options = this.getNodeParameter('options', itemIndex, {}) as {
-			oneShotTools?: string;
+			oneShotTools?: {
+				tools?: Array<{ name: string }>;
+			};
 			frequencyPenalty?: number;
 			maxTokens?: number;
 			responseFormat?: 'text' | 'json_object';
@@ -201,11 +221,10 @@ export class LmChatDeepSeek implements INodeType {
 			topP?: number;
 		};
 
-		const oneShotToolsRaw = options.oneShotTools || '';
-		const oneShotToolsList = oneShotToolsRaw
-			.split(',')
-			.map(t => t.trim())
-			.filter(t => t.length > 0);
+		const oneShotToolsRaw = options.oneShotTools || {};
+		const oneShotToolsList = (oneShotToolsRaw.tools || [])
+			.map(item => item.name ? item.name.trim() : '')
+			.filter(name => name.length > 0);
 
 		const modelKwargs: Record<string, any> = {};
 		if (thinkingEnabled) {
