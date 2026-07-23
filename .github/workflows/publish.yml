@@ -3,6 +3,9 @@ name: Publish Community Node to npmjs
 on:
   release:
     types: [published]
+  push:
+    tags:
+      - 'v*'
 
 jobs:
   publish-package:
