@@ -8,32 +8,66 @@ import {
 
 /* eslint-disable @typescript-eslint/no-var-requires */
 /**
- * Key insight from Zekabr2023's repo:
- * Load @langchain/openai and @n8n/ai-utilities from n8n's OWN node_modules
- * so the class we subclass is EXACTLY the same instance n8n uses internally.
- * This prevents all lc_serializable_keys / prototype mismatch errors.
+ * Enhanced dependency loader:
+ * Safely resolves @langchain/openai, @n8n/ai-utilities, and @langchain/core
+ * across various n8n execution environments (Docker, Desktop, Cloud, npm).
  */
 function requireN8nDependency(dependencyName: string): any {
-	// 1. Try normal require first
-	try { return require(dependencyName); } catch (_) {}
+	// 1. Try normal require first (works if installed as dependency or hoisted)
+	try {
+		return require(dependencyName);
+	} catch (_) {}
 
-	// 2. Resolve relative to require.main (n8n itself)
+	// 2. Collect candidate search paths from runtime and module paths
+	const searchPaths: string[] = [];
+
 	if (require.main && require.main.paths) {
+		searchPaths.push(...require.main.paths);
+	}
+
+	if (typeof module !== 'undefined' && module.paths) {
+		searchPaths.push(...module.paths);
+	}
+
+	try {
+		const path = require('path');
+		let currentDir = __dirname;
+		while (currentDir) {
+			searchPaths.push(path.join(currentDir, 'node_modules'));
+			const parent = path.dirname(currentDir);
+			if (parent === currentDir) break;
+			currentDir = parent;
+		}
+		if (process.cwd()) {
+			searchPaths.push(path.join(process.cwd(), 'node_modules'));
+		}
+	} catch (_) {}
+
+	for (const searchPath of searchPaths) {
 		try {
-			const p = require.resolve(dependencyName, { paths: require.main.paths });
+			const p = require.resolve(dependencyName, { paths: [searchPath] });
 			return require(p);
 		} catch (_) {}
 	}
 
-	// 3. Fallback: resolve from n8n-workflow path without importing path or fs
-	try {
-		const workflowResolve = require.resolve('n8n-workflow');
-		const index = workflowResolve.indexOf('node_modules');
-		if (index !== -1) {
-			const base = workflowResolve.substring(0, index + 12);
-			return require(base + '/' + dependencyName);
-		}
-	} catch (_) {}
+	// 3. Try resolving relative to n8n runtime packages
+	const n8nPackages = ['@n8n/n8n-nodes-langchain', 'n8n-workflow', 'n8n-nodes-base', 'n8n'];
+	for (const pkg of n8nPackages) {
+		try {
+			const pkgPath = require.resolve(pkg);
+			const path = require('path');
+			let dir = path.dirname(pkgPath);
+			while (dir) {
+				const candidate = path.join(dir, 'node_modules', dependencyName);
+				try {
+					return require(candidate);
+				} catch (_) {}
+				const parent = path.dirname(dir);
+				if (parent === dir) break;
+				dir = parent;
+			}
+		} catch (_) {}
+	}
 
 	throw new Error(`Could not resolve ${dependencyName} from n8n's runtime`);
 }

@@ -1,6 +1,6 @@
 {
   "name": "n8n-nodes-deepseek-chat-model",
-  "version": "1.4.3",
+  "version": "1.4.4",
   "description": "n8n community node for DeepSeek Chat Model with reasoning content preservation",
   "license": "MIT",
   "author": {
@@ -38,14 +38,15 @@
       "dist/credentials/DeepSeekApi.credentials.js"
     ]
   },
-  "dependencies": {},
+  "dependencies": {
+    "@langchain/core": "^0.2.0",
+    "@langchain/openai": "^0.2.0",
+    "@n8n/ai-utilities": "^0.19.0"
+  },
   "peerDependencies": {
     "n8n-workflow": "*"
   },
   "devDependencies": {
-    "@langchain/core": "^0.2.0",
-    "@langchain/openai": "^0.2.0",
-    "@n8n/ai-utilities": "^0.19.0",
     "@n8n/node-cli": "^0.23.0",
     "@types/jest": "^29.0.0",
     "@types/node": "^20.0.0",
