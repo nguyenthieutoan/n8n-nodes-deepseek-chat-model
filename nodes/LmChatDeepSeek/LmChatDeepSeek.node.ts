@@ -8,64 +8,119 @@ import {
 
 /* eslint-disable @typescript-eslint/no-var-requires */
 /**
- * Enhanced dependency loader:
- * Safely resolves @langchain/openai, @n8n/ai-utilities, and @langchain/core
- * across various n8n execution environments (Docker, Desktop, Cloud, npm).
+ * Ultra-robust dependency loader for n8n Community Nodes:
+ * Resolves @langchain/openai, @n8n/ai-utilities, @langchain/core across all n8n runtime
+ * setups (Official Docker images, n8n Desktop, npm global, custom n8n builds, pnpm).
  */
 function requireN8nDependency(dependencyName: string): any {
-	// 1. Try normal require first (works if installed as dependency or hoisted)
+	// 1. Try standard require first
 	try {
 		return require(dependencyName);
 	} catch (_) {}
 
-	// 2. Collect candidate search paths from runtime and module paths
-	const searchPaths: string[] = [];
+	const path = require('path');
 
-	if (require.main && require.main.paths) {
-		searchPaths.push(...require.main.paths);
-	}
-
-	if (typeof module !== 'undefined' && module.paths) {
-		searchPaths.push(...module.paths);
-	}
-
-	try {
-		const path = require('path');
-		let currentDir = __dirname;
-		while (currentDir) {
-			searchPaths.push(path.join(currentDir, 'node_modules'));
-			const parent = path.dirname(currentDir);
-			if (parent === currentDir) break;
-			currentDir = parent;
+	const tryRequire = (targetPath: string) => {
+		try {
+			return require(targetPath);
+		} catch (_) {
+			return null;
 		}
+	};
+
+	// 2. Collect candidate base directories where node_modules might live
+	const candidateDirs: string[] = [];
+
+	// Climb up from __dirname
+	let currentDir = __dirname;
+	while (currentDir) {
+		candidateDirs.push(currentDir);
+		const parent = path.dirname(currentDir);
+		if (parent === currentDir) break;
+		currentDir = parent;
+	}
+
+	// Climb up from process.cwd()
+	try {
 		if (process.cwd()) {
-			searchPaths.push(path.join(process.cwd(), 'node_modules'));
+			let cwdDir = process.cwd();
+			while (cwdDir) {
+				candidateDirs.push(cwdDir);
+				const parent = path.dirname(cwdDir);
+				if (parent === cwdDir) break;
+				cwdDir = parent;
+			}
 		}
 	} catch (_) {}
 
-	for (const searchPath of searchPaths) {
+	// Climb up from require.main.filename if available
+	if (require.main && require.main.filename) {
 		try {
-			const p = require.resolve(dependencyName, { paths: [searchPath] });
-			return require(p);
+			let mainDir = path.dirname(require.main.filename);
+			while (mainDir) {
+				candidateDirs.push(mainDir);
+				const parent = path.dirname(mainDir);
+				if (parent === mainDir) break;
+				mainDir = parent;
+			}
 		} catch (_) {}
 	}
 
-	// 3. Try resolving relative to n8n runtime packages
-	const n8nPackages = ['@n8n/n8n-nodes-langchain', 'n8n-workflow', 'n8n-nodes-base', 'n8n'];
+	// Standard Docker / Global n8n paths
+	const globalPaths = [
+		'/home/node',
+		'/data',
+		'/usr/local/lib/node_modules/n8n',
+		'/usr/local/lib/node_modules',
+		'/usr/lib/node_modules',
+		'/opt/n8n',
+	];
+	for (const gp of globalPaths) {
+		candidateDirs.push(gp);
+	}
+
+	// 3. Direct path resolution against candidateDirs
+	for (const dir of candidateDirs) {
+		// dir/node_modules/dependencyName
+		const p1 = path.join(dir, 'node_modules', dependencyName);
+		let res = tryRequire(p1);
+		if (res) return res;
+
+		// dir/dependencyName (in case dir IS a node_modules folder)
+		const p2 = path.join(dir, dependencyName);
+		res = tryRequire(p2);
+		if (res) return res;
+	}
+
+	// 4. Try resolving relative to known n8n packages
+	const n8nPackages = [
+		'@n8n/n8n-nodes-langchain',
+		'n8n-nodes-base',
+		'n8n-workflow',
+		'n8n',
+	];
 	for (const pkg of n8nPackages) {
 		try {
 			const pkgPath = require.resolve(pkg);
-			const path = require('path');
 			let dir = path.dirname(pkgPath);
 			while (dir) {
-				const candidate = path.join(dir, 'node_modules', dependencyName);
-				try {
-					return require(candidate);
-				} catch (_) {}
+				const p1 = path.join(dir, 'node_modules', dependencyName);
+				let res = tryRequire(p1);
+				if (res) return res;
+
 				const parent = path.dirname(dir);
 				if (parent === dir) break;
 				dir = parent;
 			}
+		} catch (_) {}
+	}
+
+	// 5. Try require.resolve with search starting dirs
+	for (const sDir of candidateDirs) {
+		try {
+			const resolved = require.resolve(dependencyName, { paths: [sDir] });
+			const res = tryRequire(resolved);
+			if (res) return res;
 		} catch (_) {}
 	}
 
