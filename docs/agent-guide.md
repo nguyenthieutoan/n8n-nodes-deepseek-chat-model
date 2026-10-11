@@ -52,6 +52,7 @@ Connect to a **Basic LLM Chain** node for direct question-answering without tool
 | Thinking Effort | Options | `high` | Only when Thinking=true | `high` (default) or `max` (for complex logic/code) |
 | Max Output Tokens | Number | `4096` | No | Maximum tokens including reasoning tokens |
 | Temperature | Number | `1` | Only when Thinking=false | Creativity level (0-2). Hidden when thinking is enabled |
+| OpenCode Session ID | String | Workflow execution ID | No | Value sent in the `x-opencode-session` HTTP header. Leave empty to use the current workflow execution ID |
 
 ## Gotchas & Known Issues
 

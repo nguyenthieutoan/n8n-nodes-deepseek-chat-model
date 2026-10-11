@@ -205,4 +205,54 @@ describe('LmChatDeepSeek Community Node', () => {
 			globalThis.fetch = originalFetch;
 		}
 	});
+
+	test('x-opencode-session header defaults to the workflow execution ID', async () => {
+		mockSupplyDataContext.getNodeParameter = jest.fn().mockImplementation((paramName, index, fallback) => {
+			if (paramName === 'model') return 'deepseek-chat';
+			if (paramName === 'thinkingEnabled') return false;
+			if (paramName === 'options') return {};
+			return fallback;
+		});
+		mockSupplyDataContext.getExecutionId = jest.fn().mockReturnValue('exec-123');
+
+		const result = (await node.supplyData.call(mockSupplyDataContext, 0)) as any;
+		const customFetch = result.response.config.configuration.fetch;
+
+		const originalFetch = globalThis.fetch;
+		const mockFetch = jest.fn().mockResolvedValue({} as any);
+		globalThis.fetch = mockFetch;
+
+		try {
+			await customFetch('https://api.deepseek.com/v1/models', { method: 'GET' });
+			const init = (mockFetch as any).mock.calls[0][1];
+			expect(new Headers(init.headers).get('x-opencode-session')).toBe('exec-123');
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
+	});
+
+	test('x-opencode-session header uses the configured value when provided', async () => {
+		mockSupplyDataContext.getNodeParameter = jest.fn().mockImplementation((paramName, index, fallback) => {
+			if (paramName === 'model') return 'deepseek-chat';
+			if (paramName === 'thinkingEnabled') return false;
+			if (paramName === 'options') return { opencodeSession: 'my-custom-session' };
+			return fallback;
+		});
+		mockSupplyDataContext.getExecutionId = jest.fn().mockReturnValue('exec-123');
+
+		const result = (await node.supplyData.call(mockSupplyDataContext, 0)) as any;
+		const customFetch = result.response.config.configuration.fetch;
+
+		const originalFetch = globalThis.fetch;
+		const mockFetch = jest.fn().mockResolvedValue({} as any);
+		globalThis.fetch = mockFetch;
+
+		try {
+			await customFetch('https://api.deepseek.com/v1/models', { method: 'GET' });
+			const init = (mockFetch as any).mock.calls[0][1];
+			expect(new Headers(init.headers).get('x-opencode-session')).toBe('my-custom-session');
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
+	});
 });

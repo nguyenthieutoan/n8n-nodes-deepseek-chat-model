@@ -18,6 +18,7 @@ An optimized, community-verified n8n Chat Model node for **DeepSeek** (`deepseek
 * **Thinking Mode Control**: Easily toggle DeepSeek's thinking/reasoning process (Enabled/Disabled) and configure its thinking effort (`high` / `max`).
 * **AI Agent & LangChain Integration**: Fully compatible with n8n AI Agent and Advanced AI nodes.
 * **Fully Custom model names**: Support for standard models (`deepseek-chat`, `deepseek-reasoner`) as well as custom/self-hosted deployment models.
+* **Configurable `x-opencode-session` header**: Sends an `x-opencode-session` HTTP header with every request. Defaults to the current workflow execution ID and can be overridden per node via the **OpenCode Session ID** option.
 
 ## Installation
 

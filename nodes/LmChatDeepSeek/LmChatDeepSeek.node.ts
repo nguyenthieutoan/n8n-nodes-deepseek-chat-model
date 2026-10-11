@@ -279,8 +279,10 @@ function filterToolsInRequestBody(
 function createToolFilteringFetch(
 	oneShotToolsList: string[],
 	maxToolExecutions: number,
+	extraHeaders: Record<string, string> = {},
 ): typeof globalThis.fetch {
 	const hasFiltering = oneShotToolsList.length > 0 || maxToolExecutions < Infinity;
+	const headerEntries = Object.entries(extraHeaders).filter(([, value]) => value !== '');
 
 	return async function toolFilteringFetch(
 		input: RequestInfo | URL,
@@ -298,6 +300,16 @@ function createToolFilteringFetch(
 				// If JSON parsing fails, pass through unchanged
 			}
 		}
+
+		// Attach custom headers (e.g. x-opencode-session) to every outgoing request
+		if (headerEntries.length > 0) {
+			const headers = new Headers(init?.headers as HeadersInit | undefined);
+			for (const [name, value] of headerEntries) {
+				headers.set(name, value);
+			}
+			init = { ...(init ?? {}), headers };
+		}
+
 		return globalThis.fetch(input, init);
 	};
 }
@@ -378,6 +390,14 @@ export class LmChatDeepSeek implements INodeType {
 						description: 'Comma-separated list of tool names that can only be called at most once during execution.',
 					},
 					{
+						displayName: 'OpenCode Session ID',
+						name: 'opencodeSession',
+						type: 'string',
+						default: '',
+						placeholder: 'Defaults to the workflow execution ID',
+						description: 'Value sent in the x-opencode-session HTTP header. Leave empty to automatically use the current workflow execution ID.',
+					},
+					{
 						displayName: 'Frequency Penalty',
 						name: 'frequencyPenalty',
 						type: 'number',
@@ -455,6 +475,7 @@ export class LmChatDeepSeek implements INodeType {
 
 		const options = this.getNodeParameter('options', itemIndex, {}) as {
 			oneShotTools?: string;
+			opencodeSession?: string;
 			maxToolExecutions?: number;
 			frequencyPenalty?: number;
 			maxTokens?: number;
@@ -473,6 +494,19 @@ export class LmChatDeepSeek implements INodeType {
 			.filter(t => t.length > 0);
 
 		const maxToolExecutionsVal = options.maxToolExecutions !== undefined ? options.maxToolExecutions : 3;
+
+		// x-opencode-session header: configurable, defaults to the workflow execution ID.
+		let opencodeSession = (options.opencodeSession || '').trim();
+		if (!opencodeSession) {
+			try {
+				opencodeSession = this.getExecutionId();
+			} catch (_) {
+				opencodeSession = '';
+			}
+		}
+		const extraHeaders: Record<string, string> = opencodeSession
+			? { 'x-opencode-session': opencodeSession }
+			: {};
 
 		const modelKwargs: Record<string, any> = {};
 		if (thinkingEnabled) {
@@ -777,7 +811,7 @@ export class LmChatDeepSeek implements INodeType {
 			maxRetries: options.maxRetries ?? 2,
 			configuration: {
 				baseURL: baseUrl,
-				fetch: createToolFilteringFetch(oneShotToolsList, maxToolExecutionsVal),
+				fetch: createToolFilteringFetch(oneShotToolsList, maxToolExecutionsVal, extraHeaders),
 			},
 			modelKwargs,
 			callbacks: [new N8nLlmTracing(this)],
